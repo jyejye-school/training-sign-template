@@ -74,6 +74,7 @@ expect(!/SpreadsheetApp\.create\(APP\.DATA_FILE\)/.test(backend), '초기화가 
 expect(/SpreadsheetApp\.openById\(PropertiesService\.getScriptProperties\(\)\.getProperty\('SPREADSHEET_ID'\)\)/.test(backend), '웹앱 데이터 접근이 저장된 시트 ID를 사용하지 않습니다.');
 expect(/hideDataSheets_/.test(backend) && /사용설명서/.test(backend), '사용설명서 표시·데이터 탭 숨김 처리가 누락되었습니다.');
 expect(/학교 연수 전자서명 시스템 사용설명서/.test(backend) && /training-sign-template/.test(backend), '다른 학교용 배포 사용설명서 또는 템플릿 저장소 안내가 누락되었습니다.');
+expect(/현재 운영 시트에는 학교 데이터가 있으므로 다른 학교에 공유하지 마세요/.test(backend), '운영 시트를 배포용 원본으로 잘못 공유하지 않도록 하는 경고가 없습니다.');
 expect(/getMaxRows\(\)[\s\S]*getMaxColumns\(\)[\s\S]*breakApart/.test(backend), '사용설명서 재생성 시 기존 병합 셀을 안전하게 해제하지 않습니다.');
 expect(!/PDF와 XLSX가 모두 생성/.test(backend), '사용설명서에 이전 출력·삭제 조건이 남아 있습니다.');
 expect(/setProperties\(secrets, false\)/.test(backend), '재초기화가 기존 Script Properties를 보존하지 않습니다.');

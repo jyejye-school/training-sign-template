@@ -1156,8 +1156,11 @@ function ensureGuideSheet_(spreadsheet, rebuild) {
     .setBackground('#123A73')
     .setFontColor('#DCE8FF')
     .setFontSize(10);
+  const isDistributionTemplate = PropertiesService.getScriptProperties().getProperty('TEMPLATE_LOCK') === '1';
   sheet.getRange('B4:E4').merge()
-    .setValue('중요  이 파일은 배포용 원본입니다. 원본에서 초기화하지 말고 반드시 파일 → 사본 만들기로 시작하세요.')
+    .setValue(isDistributionTemplate
+      ? '중요  이 파일은 배포용 원본입니다. 원본에서 초기화하지 말고 반드시 파일 → 사본 만들기로 시작하세요.'
+      : '중요  현재 운영 시트에는 학교 데이터가 있으므로 다른 학교에 공유하지 마세요. 아래 GitHub 템플릿의 빈 배포본을 사용하세요.')
     .setBackground('#FFF4DF')
     .setFontColor('#A05A00')
     .setFontWeight('bold')
