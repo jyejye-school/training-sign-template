@@ -1,5 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="faviconTitle">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="faviconTitle">
   <title id="faviconTitle">연수 전자서명</title>
-  <rect id="brand-frame" x="3" y="3" width="94" height="94" rx="24" fill="#eff6ff" stroke="#2563eb" stroke-width="6"/>
-  <text id="writing-hand-symbol" x="50" y="78" font-size="76" text-anchor="middle" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">✍️</text>
+  <rect id="brand-tile" width="64" height="64" rx="14" fill="#2563eb"/>
+  <path id="pen-nib" d="M32 7 48 23 39 40 32 47 25 40 16 23Z" fill="#fff"/>
+  <circle cx="32" cy="24" r="3.5" fill="#2563eb"/>
+  <path d="M32 27.5V40" fill="none" stroke="#2563eb" stroke-width="3.5" stroke-linecap="round"/>
+  <path id="signature-stroke" d="M9 53c7-7 12 3 19-2 6-5 11 3 17 2 4-.5 7-2 10-5" fill="none" stroke="#bfdbfe" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
