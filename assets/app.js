@@ -52,7 +52,14 @@ const state = {
   adminAuthenticating: false,
   settingsFaviconData: '',
   staffNamesComposing: false,
-  activeExportTrainingId: ''
+  activeExportTrainingId: '',
+  activeUnsignedTrainingId: '',
+  unsignedStatusDate: '',
+  unsignedStatusMode: 'unsigned',
+  unsignedStatusCache: new Map(),
+  unsignedStatusRequest: null,
+  unsignedRefreshTimer: null,
+  pendingPreviewToken: ''
 };
 
 const demoData = {
@@ -67,7 +74,7 @@ const demoData = {
   },
   trainings: [
     { id: 'demo-training-1', title: '2026 개인정보 보호 연수', date: todaySeoul(), daily: false, startTime: '', endTime: '', active: true, sortOrder: 1 },
-    { id: 'demo-training-2', title: '학교 안전교육', date: todaySeoul(), daily: false, startTime: '09:00', endTime: '18:00', active: true, sortOrder: 2 }
+    { id: 'demo-training-2', title: '학교 안전교육', date: todaySeoul(), daily: true, startTime: '09:00', endTime: '18:00', active: true, sortOrder: 2 }
   ],
   staff: [
     { id: 'staff-1', department: '교무기획부', name: '김하늘', active: true, sortOrder: 1 },
@@ -218,6 +225,34 @@ function demoRpc(action, payload) {
     if (payload.section === 'share') return Promise.resolve({ section: 'share', shareToken: state.demoAdminData.shareToken, shareUrl: state.demoAdminData.shareUrl });
   }
   if (action === 'get_admin_data') return Promise.resolve(state.demoAdminData);
+  if (action === 'get_training_signature_status') {
+    const training = state.demoAdminData.trainings.find(item => item.id === payload.trainingId);
+    if (!training) return Promise.reject(Object.assign(new Error('연수를 찾을 수 없습니다.'), { code: 'NOT_FOUND' }));
+    if (!training.daily && payload.date !== training.date) {
+      return Promise.reject(Object.assign(new Error('이 연수는 등록된 날짜의 현황만 볼 수 있습니다.'), { code: 'INVALID_DATE' }));
+    }
+    const people = sortByRegistration(state.demoAdminData.staff.filter(person => person.active !== false)).map((person, index) => ({
+      staffId: person.id,
+      department: person.department,
+      name: person.name,
+      sortOrder: person.sortOrder,
+      status: index < 2 ? 'signed' : 'unsigned',
+      signTime: index < 2 ? (index ? '10:20' : '10:12') : ''
+    }));
+    const signedCount = people.filter(person => person.status === 'signed').length;
+    return Promise.resolve({
+      trainingId: training.id,
+      date: payload.date,
+      summary: {
+        targetCount: people.length,
+        signedCount,
+        unsignedCount: people.length - signedCount,
+        rate: people.length ? Math.round(signedCount / people.length * 1000) / 10 : 0,
+        outsideRosterSignedCount: 0
+      },
+      people
+    });
+  }
   if (action === 'list_records') return Promise.resolve({ records: [
     { id: 'record-1', department: '교무기획부', name: '김하늘', signDate: todaySeoul(), signTime: '10:12:03', trainingId: 'demo-training-1' },
     { id: 'record-2', department: '교육연구부', name: '이도윤', signDate: todaySeoul(), signTime: '10:20:14', trainingId: 'demo-training-1' }
@@ -578,9 +613,15 @@ function startAdminBackgroundSync() {
 
 function handleExpiredAdminSession(message = '관리자 로그인이 만료되었습니다. 다시 로그인해 주세요.') {
   clearInterval(state.adminSyncTimer);
+  stopUnsignedStatusRefresh();
   state.adminSession = '';
   state.adminData = null;
   state.adminLoadedAt = {};
+  state.activeExportTrainingId = '';
+  state.activeUnsignedTrainingId = '';
+  state.unsignedStatusDate = '';
+  state.unsignedStatusCache.clear();
+  state.unsignedStatusRequest = null;
   if ($('adminDialog').open) $('adminDialog').close();
   showToast(message, 4200);
 }
@@ -679,6 +720,8 @@ async function handleAdminLogin(event) {
 
 function switchAdminTab(tab, { sync = true } = {}) {
   state.adminActiveTab = tab;
+  if (tab === 'trainings' && state.activeUnsignedTrainingId) startUnsignedStatusRefresh();
+  else if (tab !== 'trainings') stopUnsignedStatusRefresh();
   document.querySelectorAll('#adminTabs button').forEach(button => button.classList.toggle('active', button.dataset.adminTab === tab));
   document.querySelectorAll('[data-admin-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.adminPanel === tab));
   if (!sync) return;
@@ -716,9 +759,12 @@ function upsertExportJob(job) {
 
 function renderTrainingAdmin() {
   const container = $('trainingAdminList');
-  const panel = $('trainingExportPanel');
-  const panelHome = $('trainingExportPanelHome');
-  if (panel && panelHome && panel.parentElement !== panelHome) panelHome.append(panel);
+  const exportPanel = $('trainingExportPanel');
+  const exportPanelHome = $('trainingExportPanelHome');
+  const unsignedPanel = $('trainingUnsignedPanel');
+  const unsignedPanelHome = $('trainingUnsignedPanelHome');
+  if (exportPanel && exportPanelHome && exportPanel.parentElement !== exportPanelHome) exportPanelHome.append(exportPanel);
+  if (unsignedPanel && unsignedPanelHome && unsignedPanel.parentElement !== unsignedPanelHome) unsignedPanelHome.append(unsignedPanel);
   const trainings = state.adminData?.trainings || [];
   container.innerHTML = trainings.length ? trainings.map((training, index) => `
     <div class="training-admin-item" data-training-id="${escapeHtml(training.id)}">
@@ -728,23 +774,37 @@ function renderTrainingAdmin() {
           <button data-action="move-up" ${training.pending || index === 0 ? 'disabled' : ''}>위</button>
           <button data-action="move-down" ${training.pending || index === trainings.length - 1 ? 'disabled' : ''}>아래</button>
           <button data-action="edit-training" ${training.pending ? 'disabled' : ''}>수정</button>
+          <button data-action="toggle-unsigned" aria-controls="trainingUnsignedPanel" aria-expanded="${state.activeUnsignedTrainingId === training.id ? 'true' : 'false'}" ${training.pending ? 'disabled' : ''}>${state.activeUnsignedTrainingId === training.id ? '현황 접기' : '미서명 현황'}</button>
           <button data-action="toggle-export" aria-controls="trainingExportPanel" aria-expanded="${state.activeExportTrainingId === training.id ? 'true' : 'false'}" ${training.pending ? 'disabled' : ''}>${state.activeExportTrainingId === training.id ? '출력 접기' : '출력'}</button>
           <button data-action="delete-training" class="danger" ${training.pending ? 'disabled' : ''}>삭제</button>
         </div>
       </div>
-      <div class="training-export-slot"></div>
+      <div class="training-tool-slot"></div>
     </div>`).join('') : '<div class="empty-state">등록된 연수가 없습니다.</div>';
-  const selected = trainings.find(training => training.id === state.activeExportTrainingId && !training.pending);
-  if (selected && panel) {
-    const preserveForm = panel.dataset.trainingId === selected.id;
-    container.querySelector(`[data-training-id="${CSS.escape(selected.id)}"] .training-export-slot`)?.append(panel);
-    panel.dataset.trainingId = selected.id;
-    setHidden(panel, false);
-    renderTrainingExportPanel(selected, { preserveForm });
-  } else if (panel) {
+  const selectedExport = trainings.find(training => training.id === state.activeExportTrainingId && !training.pending);
+  if (selectedExport && exportPanel) {
+    const preserveForm = exportPanel.dataset.trainingId === selectedExport.id;
+    container.querySelector(`[data-training-id="${CSS.escape(selectedExport.id)}"] .training-tool-slot`)?.append(exportPanel);
+    exportPanel.dataset.trainingId = selectedExport.id;
+    setHidden(exportPanel, false);
+    renderTrainingExportPanel(selectedExport, { preserveForm });
+  } else if (exportPanel) {
     state.activeExportTrainingId = '';
-    panel.dataset.trainingId = '';
-    setHidden(panel, true);
+    exportPanel.dataset.trainingId = '';
+    setHidden(exportPanel, true);
+  }
+  const selectedUnsigned = trainings.find(training => training.id === state.activeUnsignedTrainingId && !training.pending);
+  if (selectedUnsigned && unsignedPanel) {
+    const preserveDate = unsignedPanel.dataset.trainingId === selectedUnsigned.id;
+    container.querySelector(`[data-training-id="${CSS.escape(selectedUnsigned.id)}"] .training-tool-slot`)?.append(unsignedPanel);
+    unsignedPanel.dataset.trainingId = selectedUnsigned.id;
+    setHidden(unsignedPanel, false);
+    renderTrainingUnsignedPanel(selectedUnsigned, { preserveDate });
+  } else if (unsignedPanel) {
+    state.activeUnsignedTrainingId = '';
+    unsignedPanel.dataset.trainingId = '';
+    setHidden(unsignedPanel, true);
+    stopUnsignedStatusRefresh();
   }
   renderOrphanExportJobs();
 }
@@ -771,12 +831,173 @@ function collapseTrainingExport() {
 
 function toggleTrainingExport(training) {
   if (state.activeExportTrainingId === training.id) return collapseTrainingExport();
+  state.activeUnsignedTrainingId = '';
+  stopUnsignedStatusRefresh();
   state.activeExportTrainingId = training.id;
   renderTrainingAdmin();
   if (!state.adminLoadedAt.training_workspace) {
     loadAdminSection('training_workspace', { force: true, background: true }).catch(() => {});
   }
   $('trainingExportPanel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function unsignedStatusCacheKey(trainingId, date) {
+  return `${trainingId}:${date}`;
+}
+
+function isSignedStatus(person) {
+  return ['signed', 'complete', 'completed'].includes(String(person?.status || '').toLowerCase());
+}
+
+function formatStatusTime(value) {
+  const match = String(value || '').match(/(?:^|T|\s)(\d{2}):(\d{2})/);
+  return match ? `${match[1]}:${match[2]}` : '';
+}
+
+function setUnsignedStatusLoading(loading, message = '미서명 현황을 확인하는 중입니다.') {
+  const box = $('unsignedStatusLoading');
+  box.querySelector('p').textContent = message;
+  setHidden(box, !loading);
+  $('refreshUnsignedStatus').disabled = loading;
+}
+
+function renderUnsignedStatusContent(data = null) {
+  const summary = data?.summary || {};
+  $('unsignedTargetCount').textContent = Number(summary.targetCount || 0).toLocaleString('ko-KR');
+  $('unsignedSignedCount').textContent = Number(summary.signedCount || 0).toLocaleString('ko-KR');
+  $('unsignedMissingCount').textContent = Number(summary.unsignedCount || 0).toLocaleString('ko-KR');
+  const rate = Number(summary.rate || 0);
+  $('unsignedRate').textContent = `${Number.isFinite(rate) ? rate.toLocaleString('ko-KR', { maximumFractionDigits: 1 }) : 0}%`;
+  const outsideCount = Number(summary.outsideRosterSignedCount || 0);
+  $('unsignedOutsideRoster').textContent = outsideCount ? `현재 명단 외 서명 ${outsideCount}건` : '';
+  setHidden($('unsignedOutsideRoster'), !outsideCount);
+
+  document.querySelectorAll('[data-unsigned-view]').forEach(button => {
+    const active = button.dataset.unsignedView === state.unsignedStatusMode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+
+  const people = sortByRegistration(data?.people || []);
+  const visiblePeople = state.unsignedStatusMode === 'unsigned'
+    ? people.filter(person => !isSignedStatus(person))
+    : people;
+  const container = $('unsignedStatusList');
+  if (!people.length) {
+    container.innerHTML = '<div class="empty-state">현재 등록된 구성원이 없습니다.</div>';
+    return;
+  }
+  if (!visiblePeople.length) {
+    container.innerHTML = '<div class="unsigned-complete-state"><strong>현재 구성원이 모두 서명했습니다.</strong><p>전체 현황으로 바꾸면 서명 시각을 확인할 수 있습니다.</p></div>';
+    return;
+  }
+  const rows = visiblePeople.map(person => {
+    const signed = isSignedStatus(person);
+    const time = signed ? formatStatusTime(person.signTime) : '';
+    return `<tr>
+      <td>${escapeHtml(person.department || '')}</td>
+      <td>${escapeHtml(person.name || '')}</td>
+      <td><span class="signature-status ${signed ? 'signed' : 'unsigned'}">${signed ? '완료' : '미서명'}</span>${time ? `<time datetime="${escapeHtml(person.signTime)}">${escapeHtml(time)}</time>` : ''}</td>
+    </tr>`;
+  }).join('');
+  container.innerHTML = `<div class="unsigned-status-table-wrap">
+    <table class="unsigned-status-table">
+      <thead><tr><th scope="col">부서</th><th scope="col">성명</th><th scope="col">상태</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderTrainingUnsignedPanel(training, { preserveDate = false } = {}) {
+  $('trainingUnsignedTitle').textContent = training.title;
+  $('trainingUnsignedDateHint').textContent = training.daily
+    ? '매일 연수는 확인할 날짜를 선택할 수 있습니다.'
+    : `${formatKoreanDate(training.date)} 서명 현황입니다.`;
+  if (!preserveDate || !/^\d{4}-\d{2}-\d{2}$/.test(state.unsignedStatusDate)) {
+    state.unsignedStatusDate = training.daily ? todaySeoul() : training.date;
+  }
+  if (!training.daily) state.unsignedStatusDate = training.date;
+  $('unsignedStatusDate').value = state.unsignedStatusDate;
+  $('unsignedStatusDate').disabled = !training.daily;
+  const entry = state.unsignedStatusCache.get(unsignedStatusCacheKey(training.id, state.unsignedStatusDate));
+  if (entry?.data) {
+    renderUnsignedStatusContent(entry.data);
+    setUnsignedStatusLoading(false);
+  } else {
+    renderUnsignedStatusContent();
+    setUnsignedStatusLoading(true);
+  }
+}
+
+async function fetchUnsignedStatus({ force = false } = {}) {
+  const training = state.adminData?.trainings.find(item => item.id === state.activeUnsignedTrainingId);
+  if (!training) return;
+  const date = training.daily ? $('unsignedStatusDate').value : training.date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+  state.unsignedStatusDate = date;
+  const key = unsignedStatusCacheKey(training.id, date);
+  const cached = state.unsignedStatusCache.get(key);
+  if (!force && cached && Date.now() - cached.fetchedAt < ADMIN_SYNC_MS) {
+    renderUnsignedStatusContent(cached.data);
+    setUnsignedStatusLoading(false);
+    return cached.data;
+  }
+  if (state.unsignedStatusRequest?.key === key) return state.unsignedStatusRequest.promise;
+  const requestSession = state.adminSession;
+  setUnsignedStatusLoading(true, force ? '최신 서명 현황을 확인하는 중입니다.' : '미서명 현황을 확인하는 중입니다.');
+  const promise = rpc('get_training_signature_status', { trainingId: training.id, date })
+    .then(data => {
+      if (!requestSession || state.adminSession !== requestSession) return null;
+      state.unsignedStatusCache.set(key, { data, fetchedAt: Date.now() });
+      if (state.activeUnsignedTrainingId === training.id && state.unsignedStatusDate === date) {
+        renderUnsignedStatusContent(data);
+        setUnsignedStatusLoading(false);
+      }
+      return data;
+    })
+    .catch(error => {
+      if (state.activeUnsignedTrainingId === training.id && state.unsignedStatusDate === date) {
+        setUnsignedStatusLoading(false);
+        $('unsignedStatusList').innerHTML = `<div class="empty-state error-state">${escapeHtml(error.message)}</div>`;
+      }
+      throw error;
+    })
+    .finally(() => {
+      if (state.unsignedStatusRequest?.promise === promise) state.unsignedStatusRequest = null;
+    });
+  state.unsignedStatusRequest = { key, promise };
+  return promise;
+}
+
+function stopUnsignedStatusRefresh() {
+  clearInterval(state.unsignedRefreshTimer);
+  state.unsignedRefreshTimer = null;
+}
+
+function startUnsignedStatusRefresh() {
+  stopUnsignedStatusRefresh();
+  state.unsignedRefreshTimer = setInterval(() => {
+    if (!$('adminDialog').open || !state.adminSession || !state.activeUnsignedTrainingId) return;
+    fetchUnsignedStatus({ force: true }).catch(() => {});
+  }, ADMIN_SYNC_MS);
+}
+
+function collapseTrainingUnsigned() {
+  state.activeUnsignedTrainingId = '';
+  stopUnsignedStatusRefresh();
+  renderTrainingAdmin();
+}
+
+function toggleTrainingUnsigned(training) {
+  if (state.activeUnsignedTrainingId === training.id) return collapseTrainingUnsigned();
+  state.activeExportTrainingId = '';
+  state.activeUnsignedTrainingId = training.id;
+  state.unsignedStatusDate = training.daily ? todaySeoul() : training.date;
+  state.unsignedStatusMode = 'unsigned';
+  renderTrainingAdmin();
+  fetchUnsignedStatus().catch(() => {});
+  startUnsignedStatusRefresh();
+  $('trainingUnsignedPanel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 function openTrainingForm(training = null) {
@@ -848,6 +1069,7 @@ async function handleTrainingListClick(event) {
   const previousTrainings = state.adminData.trainings.map(item => ({ ...item }));
   try {
     if (button.dataset.action === 'edit-training') return openTrainingForm(training);
+    if (button.dataset.action === 'toggle-unsigned') return toggleTrainingUnsigned(training);
     if (button.dataset.action === 'toggle-export') return toggleTrainingExport(training);
     if (button.dataset.action === 'delete-training') {
       const confirmed = await requestConfirmation({
@@ -1241,7 +1463,7 @@ function exportJobHtml(job, { showTrainingTitle = false } = {}) {
       ${job.hasPdf ? '<button data-action="download-pdf">PDF</button>' : ''}
       ${job.hasXlsx ? '<button data-action="download-xlsx">엑셀</button>' : ''}
       ${job.canPurge && !job.purgedAt ? '<button class="danger" data-action="purge-originals">원본 삭제</button>' : ''}
-      ${job.status === 'processing' || job.status === 'queued' ? '<button data-action="resume-export">계속 만들기</button>' : ''}
+      ${job.canResume || job.status === 'processing' || job.status === 'queued' ? `<button data-action="resume-export">${job.status === 'failed' ? '다시 시도' : '계속 만들기'}</button>` : ''}
     </div>
   </div>`;
 }
@@ -1275,6 +1497,61 @@ function renderOrphanExportJobs() {
   setHidden(section, !jobs.length);
 }
 
+const EXPORT_PREVIEW_PHASES = ['table', 'images', 'pdf', 'loading'];
+
+function setExportPreviewPhase(phase, message = '') {
+  const phaseIndex = EXPORT_PREVIEW_PHASES.indexOf(phase);
+  document.querySelectorAll('#exportPreviewSteps [data-preview-phase]').forEach(item => {
+    const index = EXPORT_PREVIEW_PHASES.indexOf(item.dataset.previewPhase);
+    item.classList.toggle('active', index === phaseIndex);
+    item.classList.toggle('done', phaseIndex >= 0 && index < phaseIndex);
+  });
+  $('exportPreviewLoading').classList.remove('error');
+  setHidden($('exportPreviewSpinner'), false);
+  $('exportPreviewLoadingText').textContent = message || '출력 미리보기를 준비하고 있습니다.';
+}
+
+function setExportPreviewFailure(message) {
+  document.querySelectorAll('#exportPreviewSteps [data-preview-phase]').forEach(item => item.classList.remove('active'));
+  $('exportPreviewLoading').classList.add('error');
+  setHidden($('exportPreviewSpinner'), true);
+  $('exportPreviewLoadingText').textContent = message;
+  setHidden($('exportPreviewLoading'), false);
+  $('confirmExportPreview').disabled = true;
+}
+
+function prepareExportPreviewLoading(training, payload) {
+  releaseExportPreview();
+  const token = `preview-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  state.pendingPreviewToken = token;
+  const dialog = $('exportPreviewDialog');
+  $('exportPreviewMeta').textContent = `${training?.title || '연수'} · ${payload.date} · ${exportOutputLabel(payload.outputType)}`;
+  $('confirmExportPreview').textContent = exportPrimaryActionLabel(payload.outputType);
+  $('confirmExportPreview').disabled = true;
+  setHidden($('exportPreviewLoading'), false);
+  setExportPreviewPhase('table', '출력할 명단과 표를 준비하고 있습니다.');
+  if (!dialog.open) dialog.showModal();
+  return token;
+}
+
+function updateExportPreviewPhase(job) {
+  const serverPhase = String(job?.phase || '').toLowerCase();
+  if (['table', 'layout', 'prepare'].includes(serverPhase)) {
+    setExportPreviewPhase('table', '출력할 명단과 표를 준비하고 있습니다.');
+    return;
+  }
+  if (['pdf', 'render', 'converting'].includes(serverPhase) || (job?.total && Number(job.progress) >= Number(job.total) && job.status !== 'preview_ready')) {
+    setExportPreviewPhase('pdf', 'A4 PDF로 변환하고 있습니다.');
+    return;
+  }
+  if (job?.status === 'preview_ready') {
+    setExportPreviewPhase('loading', '완성된 미리보기를 불러오고 있습니다.');
+    return;
+  }
+  const count = job?.total ? ` ${Number(job.progress || 0)}/${Number(job.total)}` : '';
+  setExportPreviewPhase('images', `실제 서명 이미지를 배치하고 있습니다.${count}`);
+}
+
 async function startExport(event) {
   event.preventDefault();
   const training = state.adminData?.trainings.find(item => item.id === state.activeExportTrainingId);
@@ -1287,6 +1564,7 @@ async function startExport(event) {
     outputType: $('exportOutputType').value
   };
   if (!payload.trainingId || !payload.date) return showToast('출력할 연수와 날짜를 확인해 주세요.');
+  const previewToken = prepareExportPreviewLoading(training, payload);
   try {
     localStorage.setItem(EXPORT_SETTINGS_KEY, JSON.stringify({
       trainingId: payload.trainingId, date: payload.date, columns: String(payload.columns),
@@ -1295,28 +1573,60 @@ async function startExport(event) {
     const job = await rpc('start_export', payload);
     upsertExportJob(job);
     setHidden($('exportProgress'), false);
-    await runExportJob(job.jobId);
-  } catch (error) { showToast(error.message, 5200); }
+    updateExportPreviewPhase(job);
+    await runExportJob(job.jobId, { previewPrepared: true, previewToken });
+  } catch (error) {
+    setExportPreviewFailure(error.message);
+    showToast(error.message, 5200);
+  }
 }
 
-async function runExportJob(jobId) {
+async function runExportJob(jobId, { previewPrepared = false, previewToken = '' } = {}) {
   const box = $('exportProgress');
   setHidden(box, false);
-  let job;
+  let job = state.adminData?.exports.find(item => item.jobId === jobId);
+  if (!previewPrepared) {
+    previewToken = prepareExportPreviewLoading({
+      title: job?.trainingTitle || state.adminData?.trainings.find(item => item.id === job?.trainingId)?.title || '연수'
+    }, {
+      date: job?.date || '',
+      outputType: job?.outputType || 'pdf'
+    });
+    updateExportPreviewPhase(job);
+  }
   try {
     do {
-      job = await rpc('continue_export', { jobId });
+      updateExportPreviewPhase(job);
+      const remainingImages = Math.max(0, Number(job?.total || 0) - Number(job?.progress || 0));
+      const finalBatchExpected = remainingImages <= 30;
+      const pdfPhaseTimer = finalBatchExpected ? setTimeout(() => {
+        if (state.pendingPreviewToken === previewToken && $('exportPreviewDialog').open) {
+          setExportPreviewPhase('pdf', '실제 서명을 반영한 문서를 A4 PDF로 변환하고 있습니다.');
+        }
+      }, 700) : null;
+      try {
+        job = await rpc('continue_export', { jobId });
+      } finally {
+        clearTimeout(pdfPhaseTimer);
+      }
+      if (job.busy) {
+        await new Promise(resolve => setTimeout(resolve, 800));
+        continue;
+      }
       const percent = job.total ? Math.round(job.progress / job.total * 100) : job.status === 'preview_ready' ? 100 : 0;
       box.querySelector('progress').value = percent;
       box.querySelector('p').textContent = job.status === 'preview_ready'
         ? '실제 서명이 포함된 A4 미리보기를 만들었습니다.'
         : `서명 이미지를 배치하는 중입니다. ${job.progress}/${job.total}`;
       upsertExportJob(job);
+      updateExportPreviewPhase(job);
     } while (job.status === 'processing' || job.status === 'queued');
-    if (job.status === 'preview_ready') await openExportPreview(job);
+    if (job.status === 'preview_ready' && state.pendingPreviewToken === previewToken) await openExportPreview(job);
+    else if (job.status === 'preview_ready') showToast('미리보기가 준비되었습니다. 출력 내역에서 열 수 있습니다.', 4200);
     else if (job.status === 'failed') throw new Error(job.error || '출력 파일 생성에 실패했습니다.');
   } catch (error) {
     box.querySelector('p').textContent = error.message;
+    setExportPreviewFailure(error.message);
     showToast(error.message, 5200);
   }
 }
@@ -1328,7 +1638,7 @@ async function downloadExportBlob(jobId, format) {
   let mimeType = format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const chunks = [];
   do {
-    const chunk = await rpc('download_export_chunk', { jobId, format, offset, chunkSize: 524288 });
+    const chunk = await rpc('download_export_chunk', { jobId, format, offset, chunkSize: 1048576 });
     chunks.push(Uint8Array.from(atob(chunk.base64), character => character.charCodeAt(0)));
     offset = chunk.nextOffset;
     total = chunk.totalBytes;
@@ -1358,6 +1668,7 @@ function releaseExportPreview() {
   const preview = state.activePreview;
   if (preview?.blobUrl) URL.revokeObjectURL(preview.blobUrl);
   state.activePreview = null;
+  state.pendingPreviewToken = '';
   const frame = $('exportPreviewFrame');
   frame.removeAttribute('srcdoc');
   frame.src = 'about:blank';
@@ -1380,13 +1691,15 @@ async function openExportPreview(job) {
   const action = $('confirmExportPreview');
   $('exportPreviewMeta').textContent = `${job.trainingTitle || '연수'} · ${job.date} · ${exportOutputLabel(job.outputType)}`;
   action.textContent = exportPrimaryActionLabel(job.outputType);
-  action.disabled = false;
+  action.disabled = true;
   setHidden($('exportPreviewLoading'), false);
+  setExportPreviewPhase('loading', '완성된 미리보기를 불러오고 있습니다.');
   if (!dialog.open) dialog.showModal();
   if (DEMO) {
     $('exportPreviewFrame').srcdoc = demoPreviewHtml(job);
     setHidden($('exportPreviewLoading'), true);
     state.activePreview = { job, blobUrl: '', blob: null, fileName: '데모_서명등록부.pdf' };
+    action.disabled = false;
     return;
   }
   try {
@@ -1394,13 +1707,19 @@ async function openExportPreview(job) {
     const blobUrl = URL.createObjectURL(file.blob);
     state.activePreview = { job, blobUrl, blob: file.blob, fileName: file.fileName };
     const frame = $('exportPreviewFrame');
-    frame.addEventListener('load', () => setHidden($('exportPreviewLoading'), true), { once: true });
+    frame.addEventListener('load', () => {
+      setHidden($('exportPreviewLoading'), true);
+      action.disabled = false;
+    }, { once: true });
     frame.src = blobUrl;
     setTimeout(() => {
-      if (state.activePreview?.blobUrl === blobUrl) setHidden($('exportPreviewLoading'), true);
+      if (state.activePreview?.blobUrl === blobUrl) {
+        setHidden($('exportPreviewLoading'), true);
+        action.disabled = false;
+      }
     }, 1800);
   } catch (error) {
-    closeExportPreview();
+    setExportPreviewFailure(error.message);
     throw error;
   }
 }
@@ -1537,11 +1856,16 @@ function closeAdminAndLogout() {
   const currentShareToken = state.adminData?.shareToken || shareToken;
   const logoutRequest = state.adminSession ? rpc('logout') : Promise.resolve();
   clearInterval(state.adminSyncTimer);
+  stopUnsignedStatusRefresh();
   state.adminSession = '';
   state.adminData = null;
   state.adminLoadedAt = {};
   state.adminSectionPromises = {};
   state.activeExportTrainingId = '';
+  state.activeUnsignedTrainingId = '';
+  state.unsignedStatusDate = '';
+  state.unsignedStatusCache.clear();
+  state.unsignedStatusRequest = null;
   state.records = [];
   if ($('adminDialog').open) $('adminDialog').close();
   logoutRequest.catch(() => { /* 이미 만료된 서버 세션은 별도 안내가 필요하지 않습니다. */ });
@@ -1605,6 +1929,21 @@ function bindEvents() {
   $('trainingForm').addEventListener('submit', saveTraining);
   $('trainingAdminList').addEventListener('click', handleTrainingListClick);
   $('collapseTrainingExport').addEventListener('click', collapseTrainingExport);
+  $('collapseTrainingUnsigned').addEventListener('click', collapseTrainingUnsigned);
+  $('unsignedStatusDate').addEventListener('change', event => {
+    state.unsignedStatusDate = event.currentTarget.value;
+    fetchUnsignedStatus({ force: true }).catch(() => {});
+  });
+  $('unsignedStatusViewToggle').addEventListener('click', event => {
+    const button = event.target.closest('[data-unsigned-view]');
+    if (!button) return;
+    state.unsignedStatusMode = button.dataset.unsignedView;
+    const key = unsignedStatusCacheKey(state.activeUnsignedTrainingId, state.unsignedStatusDate);
+    renderUnsignedStatusContent(state.unsignedStatusCache.get(key)?.data || null);
+  });
+  $('refreshUnsignedStatus').addEventListener('click', () => {
+    fetchUnsignedStatus({ force: true }).catch(error => showToast(error.message, 4200));
+  });
   $('staffNames').addEventListener('compositionstart', () => { state.staffNamesComposing = true; });
   $('staffNames').addEventListener('compositionend', () => { state.staffNamesComposing = false; normalizeStaffNamesField(); });
   $('staffNames').addEventListener('input', event => { if (!state.staffNamesComposing && !event.isComposing) normalizeStaffNamesField(); });
