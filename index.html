@@ -8,11 +8,11 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'">
   <title>학교 연수 전자서명</title>
   <link id="faviconLink" rel="icon" type="image/svg+xml" href="favicon.svg?v=20260715.2">
-  <link rel="stylesheet" href="assets/styles.css?v=20260716.1">
+  <link rel="stylesheet" href="assets/styles.css?v=20260720.1">
   <script src="assets/config.js"></script>
   <script src="vendor/qrcode.js" defer></script>
   <script src="vendor/xlsx.full.min.js" defer></script>
-  <script type="module" src="assets/app.js?v=20260716.3"></script>
+  <script type="module" src="assets/app.js?v=20260720.1"></script>
 </head>
 <body data-panel="loadingPanel">
   <a class="skip-link" href="#mainContent">본문으로 바로가기</a>
@@ -191,10 +191,38 @@
         <p>관리자 정보를 불러오는 중입니다.</p>
       </div>
       <section class="admin-section active" data-admin-panel="trainings">
-        <div class="section-heading"><div><h3>연수 관리</h3><p>연수를 설정하고 각 연수에서 서명등록부를 출력합니다.</p></div><button id="newTraining" class="button primary" type="button">새 연수</button></div>
+        <div class="section-heading"><div><h3>연수 관리</h3><p>연수를 설정하고 각 연수의 미서명 현황과 출력 내역을 확인합니다.</p></div><button id="newTraining" class="button primary" type="button">새 연수</button></div>
         <div id="trainingAdminList" class="admin-list"></div>
+        <div id="trainingUnsignedPanelHome">
+          <section id="trainingUnsignedPanel" class="training-tool-panel training-unsigned-panel hidden" aria-labelledby="trainingUnsignedTitle">
+            <div class="training-tool-heading">
+              <div><p class="eyebrow">미서명 현황</p><h4 id="trainingUnsignedTitle"></h4><p id="trainingUnsignedDateHint" class="form-hint"></p></div>
+              <button id="collapseTrainingUnsigned" class="button quiet" type="button">접기</button>
+            </div>
+            <div class="unsigned-status-controls">
+              <label>날짜<input id="unsignedStatusDate" type="date" required></label>
+              <div id="unsignedStatusViewToggle" class="unsigned-view-toggle" role="group" aria-label="현황 표시 범위">
+                <button class="active" data-unsigned-view="unsigned" type="button" aria-pressed="true">미서명만</button>
+                <button data-unsigned-view="all" type="button" aria-pressed="false">전체 현황</button>
+              </div>
+              <button id="refreshUnsignedStatus" class="button secondary" type="button">지금 확인</button>
+            </div>
+            <dl class="unsigned-status-summary" aria-label="서명 현황 요약">
+              <div><dt>대상</dt><dd><strong id="unsignedTargetCount">0</strong>명</dd></div>
+              <div><dt>서명</dt><dd><strong id="unsignedSignedCount">0</strong>명</dd></div>
+              <div><dt>미서명</dt><dd><strong id="unsignedMissingCount">0</strong>명</dd></div>
+              <div><dt>서명률</dt><dd><strong id="unsignedRate">0%</strong></dd></div>
+            </dl>
+            <p id="unsignedOutsideRoster" class="unsigned-outside-roster hidden"></p>
+            <div id="unsignedStatusLoading" class="unsigned-status-loading" role="status" aria-live="polite">
+              <div class="spinner" aria-hidden="true"></div>
+              <p>미서명 현황을 확인하는 중입니다.</p>
+            </div>
+            <div id="unsignedStatusList" class="unsigned-status-list" aria-live="polite"></div>
+          </section>
+        </div>
         <div id="trainingExportPanelHome">
-          <section id="trainingExportPanel" class="training-export-panel hidden" aria-labelledby="trainingExportTitle">
+          <section id="trainingExportPanel" class="training-tool-panel training-export-panel hidden" aria-labelledby="trainingExportTitle">
             <div class="training-export-heading">
               <div><p class="eyebrow">서명등록부 출력</p><h4 id="trainingExportTitle"></h4><p id="trainingExportDateHint" class="form-hint"></p></div>
               <button id="collapseTrainingExport" class="button quiet" type="button">접기</button>
@@ -305,8 +333,14 @@
     </header>
     <div class="export-preview-stage">
       <div id="exportPreviewLoading" class="export-preview-loading">
-        <div class="spinner" aria-hidden="true"></div>
-        <p>미리보기를 불러오는 중입니다.</p>
+        <div id="exportPreviewSpinner" class="spinner" aria-hidden="true"></div>
+        <p id="exportPreviewLoadingText" role="status" aria-live="polite">미리보기를 불러오는 중입니다.</p>
+        <ol id="exportPreviewSteps" class="export-preview-steps" aria-label="미리보기 생성 단계">
+          <li data-preview-phase="table">표 준비</li>
+          <li data-preview-phase="images">서명 이미지 배치</li>
+          <li data-preview-phase="pdf">PDF 변환</li>
+          <li data-preview-phase="loading">미리보기 불러오기</li>
+        </ol>
       </div>
       <iframe id="exportPreviewFrame" title="서명등록부 A4 미리보기"></iframe>
     </div>

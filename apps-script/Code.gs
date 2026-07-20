@@ -5,7 +5,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '1.5.2',
+  VERSION: '1.6.0',
   TIME_ZONE: 'Asia/Seoul',
   DATA_FILE: '학교 연수 전자서명 데이터',
   GUIDE_SHEET: '사용설명서',
@@ -16,8 +16,9 @@ const APP = Object.freeze({
   MAX_SIGNATURE_BYTES: 400 * 1024,
   MAX_STAFF: 500,
   MAX_EXPORT_ROWS: 200,
-  EXPORT_BATCH_SIZE: 15,
-  DOWNLOAD_CHUNK_SIZE: 512 * 1024
+  EXPORT_BATCH_SIZE: 30,
+  DOWNLOAD_CHUNK_SIZE: 1024 * 1024,
+  EXPORT_LEASE_MS: 7 * 60 * 1000
 });
 
 const SHEETS = Object.freeze({
@@ -163,6 +164,7 @@ function dispatch_(request) {
   if (action === 'logout') return logout_(sessionToken);
   if (action === 'get_admin_data') return getAdminData_();
   if (action === 'get_admin_section') return getAdminSection_(request.section);
+  if (action === 'get_training_signature_status') return getTrainingSignatureStatus_(request.trainingId, request.date);
   if (action === 'save_settings') return withAdminMutationLock_(function() { return saveSettings_(request.settings, request.frontendUrl); });
   if (action === 'save_training') return withAdminMutationLock_(function() { return saveTraining_(request.training); });
   if (action === 'delete_training') return withAdminMutationLock_(function() { return deleteTraining_(request.trainingId); });
@@ -692,6 +694,69 @@ function listRecords_(trainingId, date) {
   return { records: records };
 }
 
+function getTrainingSignatureStatus_(trainingId, date) {
+  const id = id_(trainingId, '연수');
+  const signDate = validDate_(date);
+  const training = findRow_(SHEETS.TRAININGS, 'id', id);
+  if (!training) apiError_('NOT_FOUND', '연수를 찾을 수 없습니다.');
+  const trainingDate = sheetDateText_(training.date);
+  if (!bool_(training.daily) && trainingDate !== signDate) {
+    apiError_('TRAINING_DATE', '해당 연수는 ' + trainingDate + '의 현황만 확인할 수 있습니다.');
+  }
+
+  const activeStaff = readRows_(SHEETS.STAFF).filter(function(person) { return bool_(person.active); });
+  const signatures = readRows_(SHEETS.SIGNATURES)
+    .filter(function(record) {
+      return String(record.trainingId) === id && sheetDateText_(record.signDate) === signDate;
+    })
+    .sort(function(a, b) { return String(a.createdAt).localeCompare(String(b.createdAt)); });
+  return buildTrainingSignatureStatus_(id, signDate, activeStaff, signatures);
+}
+
+function buildTrainingSignatureStatus_(trainingId, signDate, activeStaff, signatures) {
+  const sortedStaff = activeStaff.slice().sort(staffSort_);
+  const activeIds = new Set(sortedStaff.map(function(person) { return String(person.id); }));
+  const signedByStaff = new Map();
+  let outsideRosterSignedCount = 0;
+  signatures.forEach(function(record) {
+    const staffId = String(record.staffId || '');
+    if (!activeIds.has(staffId)) {
+      outsideRosterSignedCount += 1;
+      return;
+    }
+    if (!signedByStaff.has(staffId)) signedByStaff.set(staffId, record);
+  });
+
+  let signedCount = 0;
+  const people = sortedStaff.map(function(person) {
+    const signature = signedByStaff.get(String(person.id)) || null;
+    if (signature) signedCount += 1;
+    return {
+      staffId: String(person.id),
+      department: String(person.department || ''),
+      name: String(person.name || ''),
+      sortOrder: number_(person.sortOrder),
+      status: signature ? 'signed' : 'unsigned',
+      signTime: signature ? sheetTimeText_(signature.signTime, true).slice(0, 5) : ''
+    };
+  });
+  const targetCount = people.length;
+  const unsignedCount = targetCount - signedCount;
+  const rate = targetCount ? Math.round(signedCount / targetCount * 1000) / 10 : 0;
+  return {
+    trainingId: trainingId,
+    date: signDate,
+    summary: {
+      targetCount: targetCount,
+      signedCount: signedCount,
+      unsignedCount: unsignedCount,
+      rate: rate,
+      outsideRosterSignedCount: outsideRosterSignedCount
+    },
+    people: people
+  };
+}
+
 function deleteRecord_(recordId) {
   const id = id_(recordId, '서명 기록');
   const rows = readRowsWithNumbers_(SHEETS.SIGNATURES);
@@ -727,6 +792,10 @@ function startExport_(request) {
   const showRate = bool_(request.showRate);
   const training = findRow_(SHEETS.TRAININGS, 'id', trainingId);
   if (!training) apiError_('NOT_FOUND', '연수를 찾을 수 없습니다.');
+  const trainingDate = sheetDateText_(training.date);
+  if (!bool_(training.daily) && trainingDate !== date) {
+    apiError_('TRAINING_DATE', '해당 연수는 ' + trainingDate + '만 출력할 수 있습니다.');
+  }
   const roster = buildExportRoster_(trainingId, date, sort);
   if (roster.length > APP.MAX_EXPORT_ROWS) apiError_('EXPORT_LIMIT', '한 번에 출력할 수 있는 인원은 ' + APP.MAX_EXPORT_ROWS + '명입니다.');
 
@@ -736,13 +805,16 @@ function startExport_(request) {
   const output = temporary.getSheets()[0];
   output.setName('서명등록부');
   prepareExportSheet_(output, training, date, roster, columns, showRate, sort, readSettings_());
-  const dataSheet = temporary.insertSheet('_DATA');
-  dataSheet.getRange(1, 1, 1, 6).setValues([['layoutIndex', 'staffId', 'department', 'name', 'time', 'fileId']]);
-  if (roster.length) dataSheet.getRange(2, 1, roster.length, 6).setValues(roster.map(function(row, index) { return [index, row.staffId, row.department, row.name, row.time || '', row.fileId || '']; }));
-  dataSheet.hideSheet();
-  SpreadsheetApp.flush();
+  const imageRows = [];
+  roster.forEach(function(row, index) {
+    if (row.fileId) imageRows.push([index, String(row.fileId)]);
+  });
+  const imageSheet = temporary.insertSheet('_IMAGES');
+  imageSheet.getRange(1, 1, 1, 2).setValues([['layoutIndex', 'fileId']]);
+  if (imageRows.length) imageSheet.getRange(2, 1, imageRows.length, 2).setValues(imageRows);
+  imageSheet.hideSheet();
 
-  const totalImages = roster.filter(function(row) { return Boolean(row.fileId); }).length;
+  const totalImages = imageRows.length;
   const now = new Date().toISOString();
   const job = {
     jobId: Utilities.getUuid(), trainingId: trainingId, trainingTitle: training.title, date: date,
@@ -759,12 +831,16 @@ function buildExportRoster_(trainingId, date, sort) {
   const signatures = readRows_(SHEETS.SIGNATURES)
     .filter(function(row) { return row.trainingId === trainingId && sheetDateText_(row.signDate) === date; })
     .sort(function(a, b) { return String(a.createdAt).localeCompare(String(b.createdAt)); });
-  const signedByStaff = {};
-  signatures.forEach(function(row) { signedByStaff[row.staffId] = row; });
-  const includedStaff = {};
+  const signedByStaff = new Map();
+  signatures.forEach(function(row) {
+    const staffId = String(row.staffId || '');
+    if (!signedByStaff.has(staffId)) signedByStaff.set(staffId, row);
+  });
+  const includedStaff = new Set();
   const roster = readRows_(SHEETS.STAFF).filter(function(row) { return bool_(row.active); }).map(function(person) {
-    const signature = signedByStaff[person.id];
-    includedStaff[person.id] = true;
+    const staffId = String(person.id || '');
+    const signature = signedByStaff.get(staffId);
+    includedStaff.add(staffId);
     return {
       staffId: person.id, department: person.department, name: person.name,
       time: signature ? sheetTimeText_(signature.signTime, true) : '', fileId: signature ? signature.imageFileId : '',
@@ -772,7 +848,7 @@ function buildExportRoster_(trainingId, date, sort) {
     };
   });
   signatures.forEach(function(signature, index) {
-    if (includedStaff[signature.staffId]) return;
+    if (includedStaff.has(String(signature.staffId || ''))) return;
     roster.push({
       staffId: signature.staffId, department: signature.department, name: signature.name,
       time: sheetTimeText_(signature.signTime, true), fileId: signature.imageFileId,
@@ -793,50 +869,100 @@ function prepareExportSheet_(sheet, training, date, roster, columns, showRate, s
   sheet.setHiddenGridlines(true);
   const schoolName = String(settings && settings.schoolName || '학교 연수 전자서명');
   const firstHalf = Math.max(1, Math.floor(totalColumns / 2));
-  sheet.getRange(1, 1, 1, firstHalf).merge().setValue(schoolName).setFontSize(10).setFontWeight('bold').setHorizontalAlignment('left');
-  sheet.getRange(1, firstHalf + 1, 1, totalColumns - firstHalf).merge().setValue('연수일: ' + formatKoreanDate_(date)).setFontSize(10).setHorizontalAlignment('right');
-  sheet.getRange(1, 1, 1, totalColumns).setBorder(false, false, true, false, false, false, '#315c54', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
-  sheet.getRange(2, 1, 1, totalColumns).merge().setValue(training.title + ' 서명등록부').setFontSize(18).setFontWeight('bold').setHorizontalAlignment('center');
   const signedCount = roster.filter(function(row) { return Boolean(row.fileId); }).length;
   const rate = roster.length ? Math.round(signedCount / roster.length * 1000) / 10 : 0;
-  sheet.getRange(3, 1, 1, totalColumns).merge().setValue('교직원 연수 참여 확인 기록').setHorizontalAlignment('center').setFontSize(9).setFontColor('#60706b');
   const rowsPerBlock = Math.max(1, Math.ceil(roster.length / columns));
+  let footerRow = 5 + rowsPerBlock;
+  const summaryRow = showRate ? footerRow : 0;
+  if (showRate) footerRow += 1;
+  const totalRows = footerRow;
+  const values = [];
+  for (let rowIndex = 0; rowIndex < totalRows; rowIndex += 1) {
+    values.push(new Array(totalColumns).fill(''));
+  }
+  values[0][0] = schoolName;
+  values[0][firstHalf] = '연수일: ' + formatKoreanDate_(date);
+  values[1][0] = training.title + ' 서명등록부';
+  values[2][0] = '교직원 연수 참여 확인 기록';
+  for (let block = 0; block < columns; block += 1) {
+    const valueBase = block * 4;
+    values[3][valueBase] = '번호';
+    values[3][valueBase + 1] = '부서';
+    values[3][valueBase + 2] = '성명';
+    values[3][valueBase + 3] = '서명';
+  }
+  roster.forEach(function(row, index) {
+    const position = exportPosition_(index, rowsPerBlock);
+    const valueBase = position.block * 4;
+    const valueRow = position.row - 1;
+    values[valueRow][valueBase] = index + 1;
+    values[valueRow][valueBase + 1] = row.department;
+    values[valueRow][valueBase + 2] = row.name + (row.time ? '\n' + String(row.time).slice(0, 5) : '');
+    values[valueRow][valueBase + 3] = row.fileId ? '' : '미서명';
+  });
+  if (showRate) {
+    values[summaryRow - 1][0] = '대상 ' + roster.length + '명 · 서명 ' + signedCount + '명 · 미서명 ' + (roster.length - signedCount) + '명 · 서명률 ' + rate + '%';
+  }
+  values[footerRow - 1][0] = '연수 참여 확인용 자동 생성 문서 · 생성 시각 ' + formatDate_(new Date(), 'yyyy-MM-dd HH:mm');
+  sheet.getRange(1, 1, totalRows, totalColumns).setValues(values);
+
+  sheet.getRange(1, 1, 1, firstHalf).merge()
+    .setFontSize(10).setFontWeight('bold').setHorizontalAlignment('left');
+  sheet.getRange(1, firstHalf + 1, 1, totalColumns - firstHalf).merge()
+    .setFontSize(10).setHorizontalAlignment('right');
+  sheet.getRange(1, 1, 1, totalColumns)
+    .setBorder(false, false, true, false, false, false, '#315c54', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+  sheet.getRange(2, 1, 1, totalColumns).merge()
+    .setFontSize(18).setFontWeight('bold').setHorizontalAlignment('center');
+  sheet.getRange(3, 1, 1, totalColumns).merge()
+    .setHorizontalAlignment('center').setFontSize(9).setFontColor('#60706b');
+  sheet.getRange(4, 1, 1, totalColumns)
+    .setFontWeight('bold').setBackground('#dfece8').setHorizontalAlignment('center')
+    .setBorder(true, true, true, true, true, true);
+
+  const body = sheet.getRange(5, 1, rowsPerBlock, totalColumns);
+  body.setBorder(true, true, true, true, true, true).setVerticalAlignment('middle');
   for (let block = 0; block < columns; block += 1) {
     const base = 1 + block * 4;
-    sheet.getRange(4, base, 1, 4).setValues([['번호', '부서', '성명', '서명']]).setFontWeight('bold').setBackground('#dfece8').setHorizontalAlignment('center').setBorder(true, true, true, true, true, true);
     sheet.setColumnWidth(base, 38);
     sheet.setColumnWidth(base + 1, columns === 3 ? 72 : 90);
     sheet.setColumnWidth(base + 2, columns === 3 ? 78 : 92);
     sheet.setColumnWidth(base + 3, columns === 1 ? 230 : columns === 3 ? 112 : 150);
+    sheet.getRange(5, base, rowsPerBlock, 1).setHorizontalAlignment('center');
+    sheet.getRange(5, base + 1, rowsPerBlock, 1)
+      .setWrap(true).setHorizontalAlignment('center').setFontSize(columns === 3 ? 7 : 8);
+    sheet.getRange(5, base + 2, rowsPerBlock, 1)
+      .setWrap(true).setHorizontalAlignment('center');
+    sheet.getRange(5, base + 3, rowsPerBlock, 1)
+      .setHorizontalAlignment('center').setFontColor('#b4473d').setFontSize(8);
+
+    const richTextValues = [];
+    for (let offset = 0; offset < rowsPerBlock; offset += 1) {
+      const rosterIndex = block * rowsPerBlock + offset;
+      const row = rosterIndex < roster.length ? roster[rosterIndex] : null;
+      const nameText = row ? row.name + (row.time ? '\n' + String(row.time).slice(0, 5) : '') : '';
+      const richText = SpreadsheetApp.newRichTextValue().setText(nameText);
+      if (row && row.name) {
+        richText.setTextStyle(0, row.name.length, SpreadsheetApp.newTextStyle()
+          .setBold(true).setFontSize(columns === 3 ? 8 : 9).build());
+        if (row.time) {
+          richText.setTextStyle(row.name.length + 1, nameText.length, SpreadsheetApp.newTextStyle()
+            .setFontSize(7).setForegroundColor('#66736f').build());
+        }
+      }
+      richTextValues.push([richText.build()]);
+    }
+    sheet.getRange(5, base + 2, rowsPerBlock, 1).setRichTextValues(richTextValues);
   }
-  roster.forEach(function(row, index) {
-    const position = exportPosition_(index, rowsPerBlock);
-    const base = 1 + position.block * 4;
-    sheet.getRange(position.row, base, 1, 4).setValues([[index + 1, row.department, '', row.fileId ? '' : '미서명']]);
-    const nameText = row.name + (row.time ? '\n' + String(row.time).slice(0, 5) : '');
-    const richText = SpreadsheetApp.newRichTextValue().setText(nameText)
-      .setTextStyle(0, row.name.length, SpreadsheetApp.newTextStyle().setBold(true).setFontSize(columns === 3 ? 8 : 9).build());
-    if (row.time) richText.setTextStyle(row.name.length + 1, nameText.length, SpreadsheetApp.newTextStyle().setFontSize(7).setForegroundColor('#66736f').build());
-    sheet.getRange(position.row, base + 2).setRichTextValue(richText.build()).setWrap(true).setHorizontalAlignment('center');
-    sheet.getRange(position.row, base, 1, 4).setBorder(true, true, true, true, true, true).setVerticalAlignment('middle');
-    sheet.getRange(position.row, base).setHorizontalAlignment('center');
-    sheet.getRange(position.row, base + 1).setWrap(true).setHorizontalAlignment('center').setFontSize(columns === 3 ? 7 : 8);
-    sheet.getRange(position.row, base + 3).setHorizontalAlignment('center');
-    if (!row.fileId) sheet.getRange(position.row, base + 3).setFontColor('#b4473d').setFontSize(8);
-    sheet.setRowHeight(position.row, columns === 3 ? 52 : 58);
-  });
+  sheet.setRowHeights(5, rowsPerBlock, columns === 3 ? 52 : 58);
   if (sort === 'department') mergeExportDepartments_(sheet, roster, columns, rowsPerBlock);
-  let footerRow = 5 + rowsPerBlock;
   if (showRate) {
-    sheet.getRange(footerRow, 1, 1, totalColumns).merge()
-      .setValue('대상 ' + roster.length + '명 · 서명 ' + signedCount + '명 · 미서명 ' + (roster.length - signedCount) + '명 · 서명률 ' + rate + '%')
+    sheet.getRange(summaryRow, 1, 1, totalColumns).merge()
       .setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center').setBackground('#f1f6f4')
       .setBorder(true, true, true, true, false, false, '#9fb8b1', SpreadsheetApp.BorderStyle.SOLID);
-    sheet.setRowHeight(footerRow, 32);
-    footerRow += 1;
+    sheet.setRowHeight(summaryRow, 32);
   }
   sheet.getRange(footerRow, 1, 1, totalColumns).merge()
-    .setValue('연수 참여 확인용 자동 생성 문서 · 생성 시각 ' + formatDate_(new Date(), 'yyyy-MM-dd HH:mm'))
     .setFontSize(7).setFontColor('#7a8783').setHorizontalAlignment('center');
   sheet.setRowHeight(1, 28);
   sheet.setRowHeight(2, 34);
@@ -865,71 +991,249 @@ function mergeExportDepartments_(sheet, roster, columns, rowsPerBlock) {
 
 function continueExport_(jobId) {
   const id = id_(jobId, '출력 작업');
-  const entry = findRowWithNumber_(SHEETS.EXPORTS, 'jobId', id);
-  if (!entry) apiError_('NOT_FOUND', '출력 작업을 찾을 수 없습니다.');
-  let job = entry.data;
-  if (job.status === 'preview_ready' || job.status === 'complete' || job.status === 'failed' || job.status === 'expired') return publicJob_(job);
+  const initialJob = findRow_(SHEETS.EXPORTS, 'jobId', id);
+  if (!initialJob) apiError_('NOT_FOUND', '출력 작업을 찾을 수 없습니다.');
+  if (exportJobIsTerminal_(initialJob)) return publicJob_(initialJob);
+  const leaseToken = acquireExportLease_(id);
+  if (!leaseToken) {
+    invalidateRows_(SHEETS.EXPORTS);
+    const current = findRow_(SHEETS.EXPORTS, 'jobId', id);
+    if (!current) apiError_('NOT_FOUND', '출력 작업을 찾을 수 없습니다.');
+    if (exportJobIsTerminal_(current)) return publicJob_(current);
+    const busyJob = publicJob_(current);
+    busyJob.busy = true;
+    return busyJob;
+  }
+  let entry = null;
+  let job = null;
   try {
-    updateExportJob_(entry.rowNumber, { status: 'processing', error: '' });
+    invalidateRows_(SHEETS.EXPORTS);
+    entry = findRowWithNumber_(SHEETS.EXPORTS, 'jobId', id);
+    if (!entry) apiError_('NOT_FOUND', '출력 작업을 찾을 수 없습니다.');
+    job = entry.data;
+    if (exportJobIsTerminal_(job)) return publicJob_(job);
     const spreadsheet = SpreadsheetApp.openById(job.tempSpreadsheetId);
-    const dataSheet = spreadsheet.getSheetByName('_DATA');
     const output = spreadsheet.getSheetByName('서명등록부');
-    if (!dataSheet || !output) throw new Error('임시 출력 데이터를 찾을 수 없습니다.');
-    const rowCount = Math.max(0, dataSheet.getLastRow() - 1);
-    const data = rowCount ? dataSheet.getRange(2, 1, rowCount, 6).getValues() : [];
-    const withImages = data.filter(function(row) { return Boolean(row[5]); });
+    if (!output) throw new Error('임시 출력 문서를 찾을 수 없습니다.');
     const start = number_(job.progress);
-    const batch = withImages.slice(start, start + APP.EXPORT_BATCH_SIZE);
-    const rowsPerBlock = Math.max(1, Math.ceil(data.length / number_(job.columns)));
-    batch.forEach(function(row) {
-      const layoutIndex = number_(row[0]);
+    const imageData = readExportImageBatch_(spreadsheet, start);
+    const fetchedImages = fetchPrivateDriveImages_(imageData.batch);
+    const rowsPerBlock = exportRowsPerBlock_(output, job);
+    fetchedImages.forEach(function(item) {
+      const layoutIndex = number_(item.layoutIndex);
       const position = exportPosition_(layoutIndex, rowsPerBlock);
       const column = 4 + position.block * 4;
+      if (item.blob) {
+        try {
+          const image = output.insertImage(item.blob, column, position.row);
+          const imageWidth = number_(job.columns) === 1 ? 215 : number_(job.columns) === 3 ? 104 : 140;
+          image.setWidth(imageWidth).setHeight(number_(job.columns) === 3 ? 44 : 50);
+          return;
+        } catch (ignore) {
+          // The placeholder below keeps one unreadable image from failing the entire export.
+        }
+      }
       try {
-        const blob = DriveApp.getFileById(String(row[5])).getBlob();
-        const image = output.insertImage(blob, column, position.row);
-        const imageWidth = number_(job.columns) === 1 ? 215 : number_(job.columns) === 3 ? 104 : 140;
-        image.setWidth(imageWidth).setHeight(number_(job.columns) === 3 ? 44 : 50);
-      } catch (imageError) {
         output.getRange(position.row, column).setValue('이미지 없음').setFontColor('#b4473d').setFontSize(8);
+      } catch (ignore) {
+        // Continue processing the other signatures even if a placeholder cannot be written.
       }
     });
-    SpreadsheetApp.flush();
-    const nextProgress = start + batch.length;
-    updateExportJob_(entry.rowNumber, { progress: nextProgress, total: withImages.length, status: 'processing' });
-    if (nextProgress >= withImages.length) {
-      job = createExportPreview_(entry.rowNumber, Object.assign({}, job, { progress: nextProgress, total: withImages.length }));
+    const nextProgress = start + imageData.processedCount;
+    const nextJob = Object.assign({}, job, {
+      progress: nextProgress,
+      total: imageData.total,
+      status: 'processing',
+      error: ''
+    });
+    if (nextProgress >= imageData.total) {
+      job = nextJob;
+      job = createExportPreview_(entry.rowNumber, nextJob, spreadsheet);
     } else {
-      job = findRowWithNumber_(SHEETS.EXPORTS, 'jobId', id).data;
+      job = writeExportJobChanges_(entry.rowNumber, job, {
+        progress: nextProgress,
+        total: imageData.total,
+        status: 'processing',
+        error: ''
+      });
     }
     return publicJob_(job);
   } catch (error) {
-    updateExportJob_(entry.rowNumber, { status: 'failed', error: String(error.message || error).slice(0, 500) });
-    return publicJob_(findRowWithNumber_(SHEETS.EXPORTS, 'jobId', id).data);
+    if (!entry || !job) throw error;
+    invalidateRows_(SHEETS.EXPORTS);
+    const latest = findRow_(SHEETS.EXPORTS, 'jobId', id);
+    if (latest && exportJobIsTerminal_(latest)) return publicJob_(latest);
+    job = writeExportJobChanges_(entry.rowNumber, job, {
+      status: 'failed',
+      error: String(error && error.message || error).slice(0, 500)
+    });
+    return publicJob_(job);
+  } finally {
+    releaseExportLease_(id, leaseToken);
   }
 }
 
-function createExportPreview_(rowNumber, job) {
-  const spreadsheet = SpreadsheetApp.openById(job.tempSpreadsheetId);
-  const dataSheet = spreadsheet.getSheetByName('_DATA');
-  if (dataSheet) spreadsheet.deleteSheet(dataSheet);
+function exportJobIsTerminal_(job) {
+  if (!job) return false;
+  if (['preview_ready', 'complete', 'expired'].indexOf(String(job.status)) >= 0) return true;
+  return job.status === 'failed' && !job.tempSpreadsheetId;
+}
+
+function acquireExportLease_(jobId) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return '';
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const key = 'EXPORT_LEASE_' + jobId;
+    const current = String(properties.getProperty(key) || '');
+    const currentExpiresAt = number_(current.split('|')[1]);
+    if (currentExpiresAt > Date.now()) return '';
+    const token = Utilities.getUuid() + '|' + String(Date.now() + APP.EXPORT_LEASE_MS);
+    properties.setProperty(key, token);
+    return token;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function releaseExportLease_(jobId, leaseToken) {
+  if (!leaseToken) return;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const key = 'EXPORT_LEASE_' + jobId;
+    if (properties.getProperty(key) === leaseToken) properties.deleteProperty(key);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function readExportImageBatch_(spreadsheet, start) {
+  const imageSheet = spreadsheet.getSheetByName('_IMAGES');
+  if (imageSheet) {
+    const total = Math.max(0, imageSheet.getLastRow() - 1);
+    const count = Math.max(0, Math.min(APP.EXPORT_BATCH_SIZE, total - start));
+    const rows = count ? imageSheet.getRange(start + 2, 1, count, 2).getValues() : [];
+    return {
+      total: total,
+      processedCount: count,
+      batch: rows.map(function(row) {
+        return { layoutIndex: number_(row[0]), fileId: String(row[1] || '') };
+      }).filter(function(row) { return Boolean(row.fileId); })
+    };
+  }
+
+  // Jobs created before v1.6.0 keep the full roster in _DATA.
+  const legacySheet = spreadsheet.getSheetByName('_DATA');
+  if (!legacySheet) throw new Error('임시 출력 데이터를 찾을 수 없습니다.');
+  const rowCount = Math.max(0, legacySheet.getLastRow() - 1);
+  const data = rowCount ? legacySheet.getRange(2, 1, rowCount, 6).getValues() : [];
+  const withImages = data.filter(function(row) { return Boolean(row[5]); });
+  return {
+    total: withImages.length,
+    processedCount: Math.min(APP.EXPORT_BATCH_SIZE, Math.max(0, withImages.length - start)),
+    batch: withImages.slice(start, start + APP.EXPORT_BATCH_SIZE).map(function(row) {
+      return { layoutIndex: number_(row[0]), fileId: String(row[5] || '') };
+    })
+  };
+}
+
+function fetchPrivateDriveImages_(batch) {
+  if (!batch.length) return [];
+  const token = ScriptApp.getOAuthToken();
+  const requests = batch.map(function(item) {
+    return {
+      url: 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(item.fileId) + '?alt=media&supportsAllDrives=true',
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + token },
+      muteHttpExceptions: true
+    };
+  });
+  let responses = null;
+  try {
+    responses = UrlFetchApp.fetchAll(requests);
+  } catch (error) {
+    responses = [];
+  }
+  return batch.map(function(item, index) {
+    const response = responses[index];
+    const code = response ? response.getResponseCode() : 0;
+    let blob = code >= 200 && code < 300 ? response.getBlob().setName('signature.png') : null;
+    if (!blob) {
+      try {
+        blob = DriveApp.getFileById(item.fileId).getBlob().setName('signature.png');
+      } catch (ignore) {
+        blob = null;
+      }
+    }
+    return {
+      layoutIndex: item.layoutIndex,
+      blob: blob
+    };
+  });
+}
+
+function exportRowsPerBlock_(output, job) {
+  const footerRows = bool_(job.showRate) ? 6 : 5;
+  return Math.max(1, output.getLastRow() - footerRows);
+}
+
+function createExportPreview_(rowNumber, job, spreadsheet) {
+  spreadsheet = spreadsheet || SpreadsheetApp.openById(job.tempSpreadsheetId);
   SpreadsheetApp.flush();
-  Utilities.sleep(1000);
   const exportFolder = DriveApp.getFolderById(PropertiesService.getScriptProperties().getProperty('EXPORT_FOLDER_ID'));
   const safeName = safeFileName_(job.trainingTitle + '_' + sheetDateText_(job.date) + '_서명등록부');
   const previewFile = exportFolder.createFile(exportSpreadsheetBlob_(spreadsheet, 'pdf').setName('미리보기_' + safeName + '.pdf'));
-  updateExportJob_(rowNumber, { status: 'preview_ready', previewFileId: previewFile.getId(), error: '' });
-  audit_('preview_export', job.jobId, number_(job.total), safeName);
-  return findRowWithNumber_(SHEETS.EXPORTS, 'jobId', job.jobId).data;
+  const stored = writeExportJobChanges_(rowNumber, job, {
+    status: 'preview_ready',
+    previewFileId: previewFile.getId(),
+    error: ''
+  });
+  try {
+    removeExportHelperSheets_(spreadsheet);
+  } catch (cleanupError) {
+    console.warn('출력 보조 시트 정리 실패: ' + String(cleanupError && cleanupError.message || cleanupError));
+  }
+  try {
+    audit_('preview_export', job.jobId, number_(job.total), safeName);
+  } catch (auditError) {
+    console.warn('출력 미리보기 감사 기록 실패: ' + String(auditError && auditError.message || auditError));
+  }
+  return stored;
+}
+
+function removeExportHelperSheets_(spreadsheet) {
+  const imageSheet = spreadsheet.getSheetByName('_IMAGES');
+  if (imageSheet) spreadsheet.deleteSheet(imageSheet);
+  const legacySheet = spreadsheet.getSheetByName('_DATA');
+  if (legacySheet) spreadsheet.deleteSheet(legacySheet);
 }
 
 function exportSpreadsheetBlob_(spreadsheet, format) {
   const base = 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export';
-  const auth = { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: false };
-  if (format === 'xlsx') return UrlFetchApp.fetch(base + '?format=xlsx', auth).getBlob();
-  const output = spreadsheet.getSheetByName('서명등록부');
-  const url = base + '?format=pdf&gid=' + output.getSheetId() + '&size=A4&portrait=true&fitw=true&sheetnames=false&printtitle=false&pagenum=CENTER&gridlines=false&fzr=true&top_margin=0.35&bottom_margin=0.4&left_margin=0.3&right_margin=0.3';
-  return UrlFetchApp.fetch(url, auth).getBlob();
+  let url = base + '?format=xlsx';
+  if (format === 'pdf') {
+    const output = spreadsheet.getSheetByName('서명등록부');
+    url = base + '?format=pdf&gid=' + output.getSheetId() + '&size=A4&portrait=true&fitw=true&sheetnames=false&printtitle=false&pagenum=CENTER&gridlines=false&fzr=true&top_margin=0.35&bottom_margin=0.4&left_margin=0.3&right_margin=0.3';
+  }
+  const options = {
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true
+  };
+  let lastError = '';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = UrlFetchApp.fetch(url, options);
+    const code = response.getResponseCode();
+    const bytes = response.getContent();
+    const validHeader = format === 'pdf'
+      ? bytes.length > 4 && String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) === '%PDF'
+      : bytes.length > 2 && String.fromCharCode(bytes[0], bytes[1]) === 'PK';
+    if (code >= 200 && code < 300 && bytes.length > 100 && validHeader) return response.getBlob();
+    lastError = 'HTTP ' + code + ', ' + bytes.length + ' bytes';
+    if (attempt < 2) Utilities.sleep(250 * (attempt + 1));
+  }
+  throw new Error('출력 파일 변환에 실패했습니다. ' + lastError);
 }
 
 function finalizeExport_(jobId) {
@@ -947,6 +1251,7 @@ function finalizeExport_(jobId) {
       changes.pdfFileId = previewFile.getId();
     } else {
       const spreadsheet = SpreadsheetApp.openById(job.tempSpreadsheetId);
+      removeExportHelperSheets_(spreadsheet);
       const exportFolder = DriveApp.getFolderById(PropertiesService.getScriptProperties().getProperty('EXPORT_FOLDER_ID'));
       const xlsxFile = exportFolder.createFile(exportSpreadsheetBlob_(spreadsheet, 'xlsx').setName(safeName + '.xlsx'));
       changes.xlsxFileId = xlsxFile.getId();
@@ -982,15 +1287,98 @@ function downloadExportChunk_(jobId, format, offset, chunkSize) {
   if (normalizedFormat !== 'preview' && job.status !== 'complete') apiError_('EXPORT_NOT_READY', '출력 파일이 아직 준비되지 않았습니다.');
   const fileId = normalizedFormat === 'preview' ? job.previewFileId : normalizedFormat === 'pdf' ? job.pdfFileId : job.xlsxFileId;
   if (!fileId) apiError_('NOT_FOUND', '출력 파일을 찾을 수 없습니다.');
-  const file = DriveApp.getFileById(fileId);
-  const bytes = file.getBlob().getBytes();
+  const token = ScriptApp.getOAuthToken();
+  const driveUrl = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(String(fileId));
+  const metadata = getDriveDownloadMetadata_(String(fileId), driveUrl, token);
+  const totalBytes = Math.max(0, number_(metadata.size));
   const start = Math.max(0, number_(offset));
   const size = Math.max(32768, Math.min(APP.DOWNLOAD_CHUNK_SIZE, number_(chunkSize) || APP.DOWNLOAD_CHUNK_SIZE));
-  const end = Math.min(bytes.length, start + size);
+  if (start >= totalBytes) {
+    return {
+      base64: '', nextOffset: totalBytes, totalBytes: totalBytes,
+      fileName: String(metadata.name || 'download'), mimeType: String(metadata.mimeType || 'application/octet-stream')
+    };
+  }
+  const end = Math.min(totalBytes, start + size);
+  const contentResponse = UrlFetchApp.fetch(
+    driveUrl + '?alt=media&supportsAllDrives=true',
+    {
+      headers: {
+        Authorization: 'Bearer ' + token,
+        Range: 'bytes=' + start + '-' + (end - 1)
+      },
+      muteHttpExceptions: true
+    }
+  );
+  const responseCode = contentResponse.getResponseCode();
+  if (responseCode !== 200 && responseCode !== 206) apiError_('DOWNLOAD_FAILED', '출력 파일을 내려받지 못했습니다.');
+  const normalized = normalizeDriveDownloadResponse_(
+    responseCode,
+    contentResponse.getHeaders(),
+    contentResponse.getContent(),
+    start,
+    end,
+    totalBytes
+  );
   return {
-    base64: Utilities.base64Encode(bytes.slice(start, end)), nextOffset: end, totalBytes: bytes.length,
-    fileName: file.getName(), mimeType: file.getMimeType()
+    base64: Utilities.base64Encode(normalized.bytes), nextOffset: normalized.nextOffset, totalBytes: totalBytes,
+    fileName: String(metadata.name || 'download'), mimeType: String(metadata.mimeType || 'application/octet-stream')
   };
+}
+
+function normalizeDriveDownloadResponse_(responseCode, headers, bytes, start, end, totalBytes) {
+  const normalizedHeaders = headers || {};
+  const contentRange = String(
+    normalizedHeaders['Content-Range'] ||
+    normalizedHeaders['content-range'] ||
+    ''
+  );
+  const expectedLength = Math.max(0, end - start);
+  if (responseCode === 206) {
+    const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange);
+    if (match && number_(match[1]) !== start) {
+      apiError_('DOWNLOAD_FAILED', '출력 파일의 다운로드 위치가 일치하지 않습니다.');
+    }
+    if (!bytes.length || bytes.length > expectedLength) bytes = bytes.slice(0, expectedLength);
+    if (!bytes.length) apiError_('DOWNLOAD_FAILED', '출력 파일 조각이 비어 있습니다.');
+    return { bytes: bytes, nextOffset: Math.min(totalBytes, start + bytes.length) };
+  }
+
+  // Drive가 Range를 무시한 경우 전체 파일을 이번 응답으로 끝내 재다운로드를 막습니다.
+  if (bytes.length === totalBytes) {
+    const remaining = start ? bytes.slice(start) : bytes;
+    if (!remaining.length) apiError_('DOWNLOAD_FAILED', '출력 파일 조각이 비어 있습니다.');
+    return { bytes: remaining, nextOffset: totalBytes };
+  }
+  if (start === 0 && bytes.length) {
+    return { bytes: bytes, nextOffset: Math.min(totalBytes, bytes.length) };
+  }
+  apiError_('DOWNLOAD_FAILED', '출력 파일을 이어받지 못했습니다. 다시 시도해 주세요.');
+}
+
+function getDriveDownloadMetadata_(fileId, driveUrl, token) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'EXPORT_FILE_META_' + fileId;
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      const metadata = JSON.parse(cached);
+      if (number_(metadata.size) > 0 && metadata.name && metadata.mimeType) return metadata;
+    } catch (ignore) {
+      // Invalid cache entries are replaced from Drive below.
+    }
+  }
+  const response = UrlFetchApp.fetch(
+    driveUrl + '?fields=name%2CmimeType%2Csize&supportsAllDrives=true',
+    { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true }
+  );
+  if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
+    apiError_('NOT_FOUND', '출력 파일을 찾을 수 없습니다.');
+  }
+  const metadata = JSON.parse(response.getContentText());
+  if (number_(metadata.size) <= 0) apiError_('DOWNLOAD_FAILED', '출력 파일 크기를 확인하지 못했습니다.');
+  cache.put(cacheKey, JSON.stringify(metadata), 600);
+  return metadata;
 }
 
 function purgeOriginals_(jobId, confirmation) {
@@ -1040,17 +1428,24 @@ function cleanupStaleExportJobs() {
 function updateExportJob_(rowNumber, changes) {
   const sheet = sheet_(SHEETS.EXPORTS);
   const current = rowObject_(SHEETS.EXPORTS.headers, sheet.getRange(rowNumber, 1, 1, SHEETS.EXPORTS.headers.length).getValues()[0]);
-  writeObjectRow_(sheet, SHEETS.EXPORTS.headers, rowNumber, Object.assign({}, current, changes, { updatedAt: new Date().toISOString() }), SHEETS.EXPORTS);
+  return writeExportJobChanges_(rowNumber, current, changes);
+}
+
+function writeExportJobChanges_(rowNumber, current, changes) {
+  const stored = Object.assign({}, current, changes, { updatedAt: new Date().toISOString() });
+  writeObjectRow_(sheet_(SHEETS.EXPORTS), SHEETS.EXPORTS.headers, rowNumber, stored, SHEETS.EXPORTS);
+  return stored;
 }
 
 function publicJob_(job) {
   const outputType = job.outputType || (job.pdfFileId && job.xlsxFileId ? 'legacy_both' : job.xlsxFileId ? 'xlsx' : job.pdfFileId ? 'pdf' : 'pdf');
+  const canResume = Boolean(job.tempSpreadsheetId && ['queued', 'processing', 'failed'].indexOf(String(job.status)) >= 0);
   return {
     jobId: job.jobId, trainingId: job.trainingId, trainingTitle: job.trainingTitle, date: sheetDateText_(job.date),
     sort: job.sort, columns: number_(job.columns), showRate: bool_(job.showRate), status: job.status,
     progress: number_(job.progress), total: number_(job.total), createdAt: job.createdAt, updatedAt: job.updatedAt,
     outputType: outputType, hasPreview: Boolean(job.previewFileId), hasPdf: Boolean(job.pdfFileId), hasXlsx: Boolean(job.xlsxFileId),
-    canPurge: canPurgeExport_(job), printOpenedAt: job.printOpenedAt || '', error: job.error || '', purgedAt: job.purgedAt || ''
+    canPurge: canPurgeExport_(job), canResume: canResume, printOpenedAt: job.printOpenedAt || '', error: job.error || '', purgedAt: job.purgedAt || ''
   };
 }
 

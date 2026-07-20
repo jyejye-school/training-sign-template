@@ -183,13 +183,44 @@ body[data-panel="trainingPanel"] .site-footer { flex: 0 0 auto; padding: .55rem 
 .subcard { display: grid; gap: 1rem; margin-bottom: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: 16px; background: #fbfcfc; }
 .admin-list { display: grid; gap: .6rem; }
 .training-admin-item { display: grid; gap: .6rem; }
-.training-export-slot:empty { display: none; }
-.training-export-panel { display: grid; gap: 1rem; margin: 0 0 .45rem; border: 1px solid color-mix(in srgb, var(--brand) 35%, var(--line)); border-radius: 16px; padding: 1rem; background: var(--brand-soft); }
-.training-export-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
-.training-export-heading h4, .training-export-heading p { margin-bottom: 0; }
-.training-export-heading .form-hint { margin-top: .3rem; }
+.training-tool-slot:empty { display: none; }
+.training-tool-panel { display: grid; gap: 1rem; margin: 0 0 .45rem; border: 1px solid color-mix(in srgb, var(--brand) 35%, var(--line)); border-radius: 16px; padding: 1rem; background: var(--brand-soft); }
+.training-tool-heading, .training-export-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.training-tool-heading h4, .training-tool-heading p, .training-export-heading h4, .training-export-heading p { margin-bottom: 0; }
+.training-tool-heading .form-hint, .training-export-heading .form-hint { margin-top: .3rem; }
 .training-export-panel .subcard { margin-bottom: 0; background: #fff; }
 .training-export-history h4 { margin-bottom: .65rem; }
+.unsigned-status-controls { display: grid; grid-template-columns: minmax(170px, .7fr) minmax(230px, 1fr) max-content; align-items: end; gap: .75rem; }
+.unsigned-status-controls > label { min-width: 0; }
+.unsigned-view-toggle { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; min-height: 44px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
+.unsigned-view-toggle button { border: 0; background: transparent; padding: .65rem .85rem; color: var(--muted); font-weight: 800; }
+.unsigned-view-toggle button + button { border-left: 1px solid var(--line); }
+.unsigned-view-toggle button.active { background: var(--brand); color: #fff; }
+.unsigned-status-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .65rem; margin: 0; }
+.unsigned-status-summary div { display: grid; gap: .15rem; border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--line)); border-radius: 13px; padding: .75rem; background: #fff; }
+.unsigned-status-summary dt { color: var(--muted); font-size: .76rem; font-weight: 750; }
+.unsigned-status-summary dd { margin: 0; color: var(--brand-dark); }
+.unsigned-status-summary strong { font-size: 1.18rem; }
+.unsigned-outside-roster { margin: -.35rem 0 0; color: var(--muted); font-size: .78rem; }
+.unsigned-status-loading { display: flex; align-items: center; justify-content: center; gap: .65rem; min-height: 64px; border-radius: 12px; background: rgba(255, 255, 255, .72); }
+.unsigned-status-loading .spinner { width: 25px; height: 25px; }
+.unsigned-status-loading p { margin: 0; color: var(--muted); font-weight: 750; }
+.unsigned-status-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 13px; background: #fff; }
+.unsigned-status-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.unsigned-status-table th, .unsigned-status-table td { padding: .72rem .8rem; border-bottom: 1px solid var(--line); text-align: left; overflow-wrap: anywhere; }
+.unsigned-status-table th { background: #f7f9f8; color: #50605b; font-size: .78rem; }
+.unsigned-status-table th:nth-child(1), .unsigned-status-table td:nth-child(1) { width: 42%; }
+.unsigned-status-table th:nth-child(2), .unsigned-status-table td:nth-child(2) { width: 31%; }
+.unsigned-status-table th:nth-child(3), .unsigned-status-table td:nth-child(3) { width: 27%; }
+.unsigned-status-table tbody tr:last-child td { border-bottom: 0; }
+.signature-status { display: inline-flex; align-items: center; border-radius: 999px; padding: .25rem .52rem; font-size: .75rem; font-weight: 850; white-space: nowrap; }
+.signature-status.signed { background: var(--brand-soft); color: var(--brand-dark); }
+.signature-status.unsigned { background: #f1f3f2; color: #67736f; }
+.signature-status + time { display: inline-block; margin-left: .45rem; color: var(--muted); font-size: .76rem; }
+.unsigned-complete-state { padding: 1.15rem; border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--line)); border-radius: 13px; background: #fff; text-align: center; }
+.unsigned-complete-state strong { color: var(--brand-dark); }
+.unsigned-complete-state p { margin: .35rem 0 0; color: var(--muted); font-size: .82rem; }
+.error-state { color: var(--danger); }
 .orphan-export-section { margin-top: 1rem; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
 .orphan-export-section summary { cursor: pointer; padding: .9rem 1rem; color: var(--brand-dark); font-weight: 800; }
 .orphan-export-section .admin-list { padding: 0 1rem 1rem; }
@@ -224,6 +255,12 @@ body[data-panel="trainingPanel"] .site-footer { flex: 0 0 auto; padding: .55rem 
 .export-preview-stage iframe { width: 100%; height: 100%; border: 0; border-radius: 10px; background: #fff; box-shadow: 0 12px 35px rgba(24, 42, 37, .14); }
 .export-preview-loading { position: absolute; inset: 1rem; z-index: 2; display: grid; place-content: center; text-align: center; border-radius: 10px; background: rgba(255, 255, 255, .96); }
 .export-preview-loading p { margin: 0; color: var(--muted); font-weight: 750; }
+.export-preview-loading.error p { color: var(--danger); }
+.export-preview-steps { display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: .45rem; width: min(720px, calc(100vw - 4rem)); margin: 1.2rem 0 0; padding: 0; list-style: none; counter-reset: preview-step; }
+.export-preview-steps li { display: grid; place-items: center; min-height: 46px; border: 1px solid var(--line); border-radius: 11px; padding: .5rem; background: #f5f7f6; color: var(--muted); font-size: .76rem; font-weight: 800; }
+.export-preview-steps li.active { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-dark); box-shadow: inset 0 -3px var(--brand); }
+.export-preview-steps li.done { border-color: color-mix(in srgb, var(--brand) 42%, var(--line)); color: var(--brand-dark); }
+.export-preview-steps li.done::before { content: '✓'; margin-right: .25rem; }
 .toast { position: fixed; left: 50%; bottom: 1.5rem; z-index: 100; transform: translateX(-50%); min-width: min(360px, calc(100vw - 2rem)); border-radius: 12px; padding: .85rem 1rem; background: #17211f; color: #fff; text-align: center; box-shadow: 0 15px 40px rgba(0,0,0,.22); }
 
 @media (max-width: 720px) {
@@ -244,8 +281,14 @@ body[data-panel="trainingPanel"] .site-footer { flex: 0 0 auto; padding: .55rem 
   .button-row .button { flex: 1; }
   .admin-row { grid-template-columns: 1fr; }
   .row-actions { justify-content: flex-start; }
-  .training-export-heading { align-items: stretch; flex-direction: column; }
-  .training-export-heading .button { align-self: flex-start; }
+  .training-tool-heading, .training-export-heading { align-items: stretch; flex-direction: column; }
+  .training-tool-heading .button, .training-export-heading .button { align-self: flex-start; }
+  .unsigned-status-controls { grid-template-columns: 1fr; align-items: stretch; }
+  .unsigned-status-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .unsigned-status-table { min-width: 0; font-size: .78rem; }
+  .unsigned-status-table th, .unsigned-status-table td { padding: .58rem .42rem; }
+  .signature-status { padding: .22rem .4rem; font-size: .7rem; }
+  .signature-status + time { display: block; margin: .22rem 0 0; }
   .import-row, .filter-row, .inline-form { align-items: stretch; flex-direction: column; }
   #renameDepartmentForm { grid-template-columns: 1fr; }
   #renameDepartmentForm .button { width: 100%; }
@@ -260,6 +303,7 @@ body[data-panel="trainingPanel"] .site-footer { flex: 0 0 auto; padding: .55rem 
   .export-preview-actions .button { flex: 1; }
   .export-preview-stage { height: calc(100% - 148px); padding: .45rem; }
   .export-preview-loading { inset: .45rem; }
+  .export-preview-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); width: min(360px, calc(100vw - 2rem)); }
 
   body[data-panel="loadingPanel"] .page-shell,
   body[data-panel="invalidPanel"] .page-shell,
