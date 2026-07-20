@@ -38,7 +38,7 @@ expect(/outsideRosterSignedCount/.test(app + backend), '현재 명단 외 서명
 expect(/const requestSession = state\.adminSession[\s\S]*state\.adminSession !== requestSession/.test(app), '로그아웃 뒤 늦게 도착한 미서명 현황 응답을 폐기하지 않습니다.');
 const statusBody = backend.slice(backend.indexOf('function getTrainingSignatureStatus_'), backend.indexOf('function deleteRecord_'));
 expect(/bool_\(person\.active\)/.test(statusBody) && /sort\(staffSort_\)/.test(statusBody), '미서명 현황이 활성 구성원 등록순을 기준으로 하지 않습니다.');
-expect(/trainingDate !== signDate/.test(statusBody) && /TRAINING_DATE/.test(statusBody), '고정 날짜 연수의 현황 날짜를 서버에서 검증하지 않습니다.');
+expect(/assertTrainingRequestDate_\(training, signDate, '현황'\)/.test(statusBody) && /function assertTrainingRequestDate_[\s\S]*TRAINING_DATE/.test(backend), '고정 날짜 연수의 현황 날짜를 서버에서 검증하지 않습니다.');
 expect(!/imageFileId|fileId|DriveApp|getBlob/.test(statusBody), '미서명 현황 API가 서명 이미지나 Drive 파일 정보를 노출합니다.');
 expect(/id="orphanExportSection"/.test(index) && /renderOrphanExportJobs/.test(app), '삭제된 연수의 출력 내역 접근 기능이 없습니다.');
 expect(/training_workspace/.test(app + backend) && /trainings:[\s\S]*exports:/.test(backend), '연수·출력 작업 통합 관리자 API가 없습니다.');
@@ -83,6 +83,14 @@ expect(/section === 'settings'[\s\S]{0,140}applySettings\(state\.adminData\.sett
 expect(/\.brand-mark-icon\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*contain/.test(read('assets/styles.css')), '학교 이름 왼쪽 파비콘의 맞춤 표시 규칙이 없습니다.');
 expect(/id="schoolDate"/.test(index) && /formatKoreanHeaderDate/.test(app), '메인 화면 날짜 표시가 없습니다.');
 expect(/data-panel="trainingPanel"[\s\S]*overflow:\s*hidden/.test(read('assets/styles.css')), '첫 단계 한 화면 배치 규칙이 없습니다.');
+expect(/isTrainingPublicOnDate_\(row, today\)/.test(backend) && /trainingDate <= today/.test(backend), '활성화한 과거 고정 연수가 공개 목록에 포함되지 않습니다.');
+expect(/trainingDate > today[\s\S]*TRAINING_DATE/.test(backend) && /trainingDate < today\) return/.test(backend), '미래 연수 차단 또는 과거 연수 재수합 규칙이 없습니다.');
+expect(/signatureMatchesTrainingDate_\(row, freshTraining, date\)/.test(backend), '고정 연수의 날짜가 지난 뒤 중복 제출을 막지 못합니다.');
+expect(/signDate:\s*date,\s*signTime:\s*time/.test(backend) && /createdAt:\s*now\.toISOString\(\),\s*scopeDate:\s*scopeDate/.test(backend), '실제 제출 날짜·시각과 연수 기준일이 함께 보존되지 않습니다.');
+expect(/state\.selectedTraining\.daily[\s\S]*state\.selectedTraining\.date[\s\S]*localDuplicateKey/.test(app), '브라우저 중복 키가 고정 연수와 매일 연수의 날짜 범위를 구분하지 않습니다.');
+expect(/signature\.scopeDate \|\| signature\.signDate/.test(backend) && /trainingScopeDate_/.test(backend), '연수 방식 변경 시 다른 날짜의 서명이 섞이지 않도록 기준일을 구분하지 않습니다.');
+expect(/signatureSnapshot:\s*JSON\.stringify/.test(backend) && /parseSignatureSnapshot_/.test(backend), '출력 뒤 추가된 서명을 원본 삭제에서 보호하는 출력 스냅샷이 없습니다.');
+expect(/지금 서명 접수 중/.test(app), '과거 연수가 현재 서명 가능하다는 안내가 없습니다.');
 expect(/LockService/.test(backend), '동시 제출 잠금이 누락되었습니다.');
 expect(/setTrashed\(true\)/.test(backend), '원본 파일 삭제 처리가 누락되었습니다.');
 expect(/function onOpen\(\)/.test(backend) && /🖊️ 전자서명 관리/.test(backend), '연결형 시트 관리 메뉴가 누락되었습니다.');

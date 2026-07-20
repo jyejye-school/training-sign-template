@@ -319,17 +319,26 @@ function renderTrainings() {
     button.type = 'button';
     button.className = 'choice-card';
     button.dataset.trainingId = training.id;
-    button.innerHTML = `<span><strong>${escapeHtml(training.title)}</strong><span class="choice-meta"><small>${escapeHtml(trainingTimeLabel(training))}</small></span></span><b aria-hidden="true">›</b>`;
+    button.innerHTML = `<span><strong>${escapeHtml(training.title)}</strong><span class="choice-meta"><small>${escapeHtml(publicTrainingTimeLabel(training))}</small></span></span><b aria-hidden="true">›</b>`;
     button.addEventListener('click', () => selectTraining(training.id));
     list.append(button);
   });
+}
+
+function publicTrainingTimeLabel(training) {
+  const label = trainingTimeLabel(training);
+  const serverDate = state.publicData?.serverDate || todaySeoul();
+  if (!training?.daily && /^\d{4}-\d{2}-\d{2}$/.test(String(training.date || '')) && training.date < serverDate) {
+    return `${label} · 지금 서명 접수 중`;
+  }
+  return label;
 }
 
 function selectTraining(trainingId) {
   state.selectedTraining = state.publicData.trainings.find(item => item.id === trainingId) || null;
   state.selectedStaff = null;
   if (!state.selectedTraining) return;
-  $('selectedTrainingLabel').textContent = `${state.selectedTraining.title} · ${trainingTimeLabel(state.selectedTraining)}`;
+  $('selectedTrainingLabel').textContent = `${state.selectedTraining.title} · ${publicTrainingTimeLabel(state.selectedTraining)}`;
   renderDepartments();
   showPanel('personPanel');
 }
@@ -460,7 +469,9 @@ async function submitSignature() {
     showToast('서명을 먼저 작성해 주세요.');
     return;
   }
-  const date = state.publicData.serverDate || todaySeoul();
+  const date = state.selectedTraining.daily
+    ? (state.publicData.serverDate || todaySeoul())
+    : state.selectedTraining.date;
   const duplicateKey = localDuplicateKey(state.selectedTraining.id, state.selectedStaff.id, date);
   if (localStorage.getItem(duplicateKey)) {
     const proceed = await requestConfirmation({
@@ -899,10 +910,16 @@ function renderUnsignedStatusContent(data = null) {
   const rows = visiblePeople.map(person => {
     const signed = isSignedStatus(person);
     const time = signed ? formatStatusTime(person.signTime) : '';
+    const signDate = signed && /^\d{4}-\d{2}-\d{2}$/.test(String(person.signDate || ''))
+      ? String(person.signDate)
+      : '';
+    const signedAt = signDate && signDate !== data?.date
+      ? `${signDate.slice(5).replace('-', '.')} ${time}`
+      : time;
     return `<tr>
       <td>${escapeHtml(person.department || '')}</td>
       <td>${escapeHtml(person.name || '')}</td>
-      <td><span class="signature-status ${signed ? 'signed' : 'unsigned'}">${signed ? '완료' : '미서명'}</span>${time ? `<time datetime="${escapeHtml(person.signTime)}">${escapeHtml(time)}</time>` : ''}</td>
+      <td><span class="signature-status ${signed ? 'signed' : 'unsigned'}">${signed ? '완료' : '미서명'}</span>${signedAt ? `<time datetime="${escapeHtml(signDate ? `${signDate}T${person.signTime}` : person.signTime)}">${escapeHtml(signedAt)}</time>` : ''}</td>
     </tr>`;
   }).join('');
   container.innerHTML = `<div class="unsigned-status-table-wrap">

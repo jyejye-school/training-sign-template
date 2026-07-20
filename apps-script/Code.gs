@@ -5,7 +5,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '1.6.0',
+  VERSION: '1.6.1',
   TIME_ZONE: 'Asia/Seoul',
   DATA_FILE: '학교 연수 전자서명 데이터',
   GUIDE_SHEET: '사용설명서',
@@ -25,8 +25,8 @@ const SHEETS = Object.freeze({
   SETTINGS: { name: '설정', headers: ['key', 'value'] },
   STAFF: { name: '구성원', headers: ['id', 'department', 'name', 'active', 'sortOrder', 'createdAt'] },
   TRAININGS: { name: '연수', headers: ['id', 'title', 'target', 'date', 'daily', 'startTime', 'endTime', 'active', 'sortOrder', 'createdAt', 'updatedAt'] },
-  SIGNATURES: { name: '서명', headers: ['id', 'trainingId', 'staffId', 'signDate', 'signTime', 'department', 'name', 'imageFileId', 'createdAt'] },
-  EXPORTS: { name: '출력 작업', headers: ['jobId', 'trainingId', 'trainingTitle', 'date', 'sort', 'columns', 'showRate', 'status', 'progress', 'total', 'tempSpreadsheetId', 'pdfFileId', 'xlsxFileId', 'createdAt', 'updatedAt', 'error', 'purgedAt', 'outputType', 'previewFileId', 'printOpenedAt'] },
+  SIGNATURES: { name: '서명', headers: ['id', 'trainingId', 'staffId', 'signDate', 'signTime', 'department', 'name', 'imageFileId', 'createdAt', 'scopeDate'] },
+  EXPORTS: { name: '출력 작업', headers: ['jobId', 'trainingId', 'trainingTitle', 'date', 'sort', 'columns', 'showRate', 'status', 'progress', 'total', 'tempSpreadsheetId', 'pdfFileId', 'xlsxFileId', 'createdAt', 'updatedAt', 'error', 'purgedAt', 'outputType', 'previewFileId', 'printOpenedAt', 'signatureSnapshot'] },
   AUDIT: { name: '감사 기록', headers: ['timestamp', 'action', 'target', 'count', 'detail'] }
 });
 
@@ -385,7 +385,7 @@ function getPublicData_(shareToken) {
     .sort(staffSort_)
     .map(publicStaff_);
   const trainings = readRows_(SHEETS.TRAININGS)
-    .filter(row => bool_(row.active) && (bool_(row.daily) || sheetDateText_(row.date) === today))
+    .filter(function(row) { return isTrainingPublicOnDate_(row, today); })
     .sort(orderSort_)
     .map(publicTraining_);
   return { settings: settings, staff: staff, trainings: trainings, privacyReady: true, serverDate: today };
@@ -423,12 +423,17 @@ function submitSignature_(request) {
     const freshTraining = findRow_(SHEETS.TRAININGS, 'id', trainingId);
     const freshPerson = findRow_(SHEETS.STAFF, 'id', staffId);
     validateSigningWindow_(freshTraining, freshPerson);
-    const duplicate = readRows_(SHEETS.SIGNATURES).some(row => row.trainingId === trainingId && row.staffId === staffId && sheetDateText_(row.signDate) === date);
-    if (duplicate) apiError_('DUPLICATE', '[' + freshTraining.title + '] ' + freshPerson.name + '님은 오늘 이미 서명을 완료했습니다.');
+    const scopeDate = trainingScopeDate_(freshTraining, date);
+    const duplicate = readRows_(SHEETS.SIGNATURES).some(function(row) {
+      return row.trainingId === trainingId &&
+        row.staffId === staffId &&
+        signatureMatchesTrainingDate_(row, freshTraining, date);
+    });
+    if (duplicate) apiError_('DUPLICATE', '[' + freshTraining.title + '] ' + freshPerson.name + '님은 이미 서명을 완료했습니다.');
     appendObject_(SHEETS.SIGNATURES, {
       id: Utilities.getUuid(), trainingId: trainingId, staffId: staffId,
       signDate: date, signTime: time, department: freshPerson.department, name: freshPerson.name,
-      imageFileId: file.getId(), createdAt: now.toISOString()
+      imageFileId: file.getId(), createdAt: now.toISOString(), scopeDate: scopeDate
     });
     return { registeredAt: now.toISOString(), signDate: date, signTime: time };
   } catch (error) {
@@ -446,10 +451,37 @@ function validateSigningWindow_(training, person) {
   const trainingDate = sheetDateText_(training.date);
   const startTime = sheetTimeText_(training.startTime, false);
   const endTime = sheetTimeText_(training.endTime, false);
-  if (!bool_(training.daily) && trainingDate !== today) apiError_('TRAINING_DATE', '오늘 서명할 수 있는 연수가 아닙니다.');
+  const daily = bool_(training.daily);
+  if (!daily) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trainingDate)) apiError_('TRAINING_DATE', '연수 날짜가 올바르지 않습니다.');
+    if (trainingDate > today) apiError_('TRAINING_DATE', trainingDate + '부터 서명할 수 있습니다.');
+  }
+  // 과거 고정 연수의 시각은 연수 당일 일정입니다. 재수합 중에는 활성 상태를 접수 스위치로 사용합니다.
+  if (!daily && trainingDate < today) return;
   const nowTime = formatDate_(new Date(), 'HH:mm');
   if (startTime && nowTime < startTime) apiError_('TOO_EARLY', '아직 서명 가능 시간이 아닙니다. ' + startTime + '부터 서명할 수 있습니다.');
   if (endTime && nowTime > endTime) apiError_('TOO_LATE', '서명 가능 시간이 종료되었습니다.');
+}
+
+function isTrainingPublicOnDate_(training, today) {
+  if (!training || !bool_(training.active)) return false;
+  if (bool_(training.daily)) return true;
+  const trainingDate = sheetDateText_(training.date);
+  return /^\d{4}-\d{2}-\d{2}$/.test(trainingDate) && trainingDate <= today;
+}
+
+function signatureMatchesTrainingDate_(signature, training, date) {
+  if (!signature || !training) return false;
+  const signatureScopeDate = sheetDateText_(signature.scopeDate || signature.signDate);
+  return signatureScopeDate === trainingScopeDate_(training, date);
+}
+
+function trainingScopeDate_(training, date) {
+  const scopeDate = bool_(training && training.daily)
+    ? sheetDateText_(date)
+    : sheetDateText_(training && training.date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(scopeDate)) apiError_('TRAINING_DATE', '연수 기준 날짜가 올바르지 않습니다.');
+  return scopeDate;
 }
 
 function getAdminData_() {
@@ -687,8 +719,13 @@ function renameDepartment_(oldDepartment, newDepartment) {
 function listRecords_(trainingId, date) {
   const id = id_(trainingId, '연수');
   const signDate = validDate_(date);
+  const training = findRow_(SHEETS.TRAININGS, 'id', id);
+  if (!training) apiError_('NOT_FOUND', '연수를 찾을 수 없습니다.');
+  assertTrainingRequestDate_(training, signDate, '기록');
   const records = readRows_(SHEETS.SIGNATURES)
-    .filter(function(row) { return row.trainingId === id && sheetDateText_(row.signDate) === signDate; })
+    .filter(function(row) {
+      return row.trainingId === id && signatureMatchesTrainingDate_(row, training, signDate);
+    })
     .sort(function(a, b) { return String(a.createdAt).localeCompare(String(b.createdAt)); })
     .map(function(row) { return { id: row.id, trainingId: row.trainingId, signDate: sheetDateText_(row.signDate), signTime: sheetTimeText_(row.signTime, true), department: row.department, name: row.name }; });
   return { records: records };
@@ -699,15 +736,12 @@ function getTrainingSignatureStatus_(trainingId, date) {
   const signDate = validDate_(date);
   const training = findRow_(SHEETS.TRAININGS, 'id', id);
   if (!training) apiError_('NOT_FOUND', '연수를 찾을 수 없습니다.');
-  const trainingDate = sheetDateText_(training.date);
-  if (!bool_(training.daily) && trainingDate !== signDate) {
-    apiError_('TRAINING_DATE', '해당 연수는 ' + trainingDate + '의 현황만 확인할 수 있습니다.');
-  }
+  assertTrainingRequestDate_(training, signDate, '현황');
 
   const activeStaff = readRows_(SHEETS.STAFF).filter(function(person) { return bool_(person.active); });
   const signatures = readRows_(SHEETS.SIGNATURES)
     .filter(function(record) {
-      return String(record.trainingId) === id && sheetDateText_(record.signDate) === signDate;
+      return String(record.trainingId) === id && signatureMatchesTrainingDate_(record, training, signDate);
     })
     .sort(function(a, b) { return String(a.createdAt).localeCompare(String(b.createdAt)); });
   return buildTrainingSignatureStatus_(id, signDate, activeStaff, signatures);
@@ -737,6 +771,7 @@ function buildTrainingSignatureStatus_(trainingId, signDate, activeStaff, signat
       name: String(person.name || ''),
       sortOrder: number_(person.sortOrder),
       status: signature ? 'signed' : 'unsigned',
+      signDate: signature ? sheetDateText_(signature.signDate) : '',
       signTime: signature ? sheetTimeText_(signature.signTime, true).slice(0, 5) : ''
     };
   });
@@ -755,6 +790,13 @@ function buildTrainingSignatureStatus_(trainingId, signDate, activeStaff, signat
     },
     people: people
   };
+}
+
+function assertTrainingRequestDate_(training, date, purpose) {
+  const trainingDate = sheetDateText_(training && training.date);
+  if (!bool_(training && training.daily) && trainingDate !== date) {
+    apiError_('TRAINING_DATE', '해당 연수는 ' + trainingDate + '의 ' + (purpose || '자료') + '만 확인할 수 있습니다.');
+  }
 }
 
 function deleteRecord_(recordId) {
@@ -796,7 +838,8 @@ function startExport_(request) {
   if (!bool_(training.daily) && trainingDate !== date) {
     apiError_('TRAINING_DATE', '해당 연수는 ' + trainingDate + '만 출력할 수 있습니다.');
   }
-  const roster = buildExportRoster_(trainingId, date, sort);
+  const scopedSignatures = readScopedSignatures_(trainingId, training, date);
+  const roster = buildExportRoster_(trainingId, date, sort, training, scopedSignatures);
   if (roster.length > APP.MAX_EXPORT_ROWS) apiError_('EXPORT_LIMIT', '한 번에 출력할 수 있는 인원은 ' + APP.MAX_EXPORT_ROWS + '명입니다.');
 
   const exportFolder = DriveApp.getFolderById(PropertiesService.getScriptProperties().getProperty('EXPORT_FOLDER_ID'));
@@ -820,17 +863,26 @@ function startExport_(request) {
     jobId: Utilities.getUuid(), trainingId: trainingId, trainingTitle: training.title, date: date,
     sort: sort, columns: columns, showRate: showRate, status: 'queued', progress: 0, total: totalImages,
     tempSpreadsheetId: temporary.getId(), pdfFileId: '', xlsxFileId: '', createdAt: now, updatedAt: now, error: '', purgedAt: '',
-    outputType: outputType, previewFileId: '', printOpenedAt: ''
+    outputType: outputType, previewFileId: '', printOpenedAt: '',
+    signatureSnapshot: JSON.stringify(scopedSignatures.map(function(signature) { return String(signature.id || ''); }).filter(Boolean))
   };
   appendObject_(SHEETS.EXPORTS, job);
   audit_('start_export', job.jobId, roster.length, training.title + ' ' + date);
   return publicJob_(job);
 }
 
-function buildExportRoster_(trainingId, date, sort) {
-  const signatures = readRows_(SHEETS.SIGNATURES)
-    .filter(function(row) { return row.trainingId === trainingId && sheetDateText_(row.signDate) === date; })
+function readScopedSignatures_(trainingId, training, date) {
+  return readRows_(SHEETS.SIGNATURES)
+    .filter(function(row) {
+      return row.trainingId === trainingId && signatureMatchesTrainingDate_(row, training, date);
+    })
     .sort(function(a, b) { return String(a.createdAt).localeCompare(String(b.createdAt)); });
+}
+
+function buildExportRoster_(trainingId, date, sort, training, scopedSignatures) {
+  training = training || findRow_(SHEETS.TRAININGS, 'id', trainingId);
+  if (!training) apiError_('NOT_FOUND', '연수를 찾을 수 없습니다.');
+  const signatures = scopedSignatures || readScopedSignatures_(trainingId, training, date);
   const signedByStaff = new Map();
   signatures.forEach(function(row) {
     const staffId = String(row.staffId || '');
@@ -843,7 +895,7 @@ function buildExportRoster_(trainingId, date, sort) {
     includedStaff.add(staffId);
     return {
       staffId: person.id, department: person.department, name: person.name,
-      time: signature ? sheetTimeText_(signature.signTime, true) : '', fileId: signature ? signature.imageFileId : '',
+      time: signature ? exportSignatureTime_(signature, training, date) : '', fileId: signature ? signature.imageFileId : '',
       sortOrder: number_(person.sortOrder), createdAt: person.createdAt || ''
     };
   });
@@ -851,7 +903,7 @@ function buildExportRoster_(trainingId, date, sort) {
     if (includedStaff.has(String(signature.staffId || ''))) return;
     roster.push({
       staffId: signature.staffId, department: signature.department, name: signature.name,
-      time: sheetTimeText_(signature.signTime, true), fileId: signature.imageFileId,
+      time: exportSignatureTime_(signature, training, date), fileId: signature.imageFileId,
       sortOrder: 1000000 + index, createdAt: signature.createdAt || ''
     });
   });
@@ -861,6 +913,16 @@ function buildExportRoster_(trainingId, date, sort) {
     return number_(a.sortOrder) - number_(b.sortOrder) || String(a.createdAt).localeCompare(String(b.createdAt));
   });
   return roster;
+}
+
+function exportSignatureTime_(signature, training, outputDate) {
+  const time = sheetTimeText_(signature && signature.signTime, true).slice(0, 5);
+  if (!time) return '';
+  const signDate = sheetDateText_(signature && signature.signDate);
+  if (!bool_(training && training.daily) && signDate && signDate !== sheetDateText_(outputDate)) {
+    return signDate.slice(5).replace('-', '.') + ' ' + time;
+  }
+  return time;
 }
 
 function prepareExportSheet_(sheet, training, date, roster, columns, showRate, sort, settings) {
@@ -897,7 +959,7 @@ function prepareExportSheet_(sheet, training, date, roster, columns, showRate, s
     const valueRow = position.row - 1;
     values[valueRow][valueBase] = index + 1;
     values[valueRow][valueBase + 1] = row.department;
-    values[valueRow][valueBase + 2] = row.name + (row.time ? '\n' + String(row.time).slice(0, 5) : '');
+    values[valueRow][valueBase + 2] = row.name + (row.time ? '\n' + String(row.time) : '');
     values[valueRow][valueBase + 3] = row.fileId ? '' : '미서명';
   });
   if (showRate) {
@@ -940,7 +1002,7 @@ function prepareExportSheet_(sheet, training, date, roster, columns, showRate, s
     for (let offset = 0; offset < rowsPerBlock; offset += 1) {
       const rosterIndex = block * rowsPerBlock + offset;
       const row = rosterIndex < roster.length ? roster[rosterIndex] : null;
-      const nameText = row ? row.name + (row.time ? '\n' + String(row.time).slice(0, 5) : '') : '';
+      const nameText = row ? row.name + (row.time ? '\n' + String(row.time) : '') : '';
       const richText = SpreadsheetApp.newRichTextValue().setText(nameText);
       if (row && row.name) {
         richText.setTextStyle(0, row.name.length, SpreadsheetApp.newTextStyle()
@@ -1388,9 +1450,13 @@ function purgeOriginals_(jobId, confirmation) {
   if (!safeEqual_(String(confirmation || ''), String(job.trainingTitle || ''))) apiError_('CONFIRMATION_MISMATCH', '연수명이 일치하지 않습니다.');
   if (job.pdfFileId) assertFileExists_(job.pdfFileId);
   if (job.xlsxFileId) assertFileExists_(job.xlsxFileId);
+  const training = findRow_(SHEETS.TRAININGS, 'id', String(job.trainingId || ''));
+  const snapshotIds = parseSignatureSnapshot_(job.signatureSnapshot);
   const sheet = sheet_(SHEETS.SIGNATURES);
   const records = readRowsWithNumbers_(SHEETS.SIGNATURES)
-    .filter(function(item) { return item.data.trainingId === job.trainingId && sheetDateText_(item.data.signDate) === sheetDateText_(job.date); })
+    .filter(function(item) {
+      return signatureBelongsToExportPurge_(item.data, job, training, snapshotIds);
+    })
     .sort(function(a, b) { return b.rowNumber - a.rowNumber; });
   let deleted = 0;
   let failed = 0;
@@ -1409,6 +1475,24 @@ function purgeOriginals_(jobId, confirmation) {
   invalidateRows_(SHEETS.EXPORTS);
   const stored = findRow_(SHEETS.EXPORTS, 'jobId', job.jobId);
   return { deleted: deleted, failed: failed, job: publicJob_(stored || job) };
+}
+
+function parseSignatureSnapshot_(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error('not an array');
+    return new Set(parsed.map(function(id) { return String(id || ''); }).filter(Boolean));
+  } catch (error) {
+    apiError_('EXPORT_DATA', '출력 당시 서명 목록을 확인하지 못했습니다. 원본을 삭제하지 않았습니다.');
+  }
+}
+
+function signatureBelongsToExportPurge_(signature, job, training, snapshotIds) {
+  if (!signature || !job || signature.trainingId !== job.trainingId) return false;
+  if (snapshotIds) return snapshotIds.has(String(signature.id || ''));
+  return sheetDateText_(signature.scopeDate || signature.signDate) === sheetDateText_(job.date);
 }
 
 function cleanupStaleExportJobs() {
@@ -1596,7 +1680,7 @@ function ensureGuideSheet_(spreadsheet, rebuild) {
         ['1', '관리자 비밀번호 만들기', '초기 설정 코드와 관리자 비밀번호를 입력합니다.', '숫자 4자리 또는 문자·숫자를 포함한 10자 이상 비밀번호를 사용할 수 있습니다.'],
         ['2', '기관 설정 입력', '기관 설정에서 학교명·부제목·안내문·개인정보 처리 안내·대표 색상을 저장합니다.', '개인정보 안내가 비어 있으면 연수를 활성화할 수 없습니다.'],
         ['3', '구성원 등록', '구성원에서 부서와 성명을 등록합니다.', '이름은 띄어쓰기·쉼표·줄바꿈으로 여러 명을 한 번에 입력하거나 엑셀·CSV를 가져올 수 있습니다.'],
-        ['4', '연수 등록', '연수에서 새 연수를 만들고 날짜·시간·활성 상태를 정합니다.', '특정 날짜 또는 매일 진행 방식을 선택할 수 있습니다.'],
+        ['4', '연수 등록', '연수에서 새 연수를 만들고 날짜·시간·활성 상태를 정합니다.', '지난 날짜의 고정 연수도 활성화하면 재수합할 수 있으며 실제 제출 날짜·시각은 따로 기록됩니다.'],
         ['5', '공유 링크 배포', '공유·보안에서 참여 링크와 QR을 복사해 학교 내부에 안내합니다.', '링크를 받은 사람은 별도 Google 계정 없이 접속합니다.']
       ]
     },
@@ -1605,7 +1689,7 @@ function ensureGuideSheet_(spreadsheet, rebuild) {
       color: '#165DFF',
       pale: '#F4F8FF',
       steps: [
-        ['1', '참여 화면 점검', '연수 날짜·시간·활성 상태를 확인하고 공유 링크를 휴대폰에서도 열어 봅니다.', '참여자는 연수 선택 → 본인 선택 → 서명 제출 순서로 진행합니다.'],
+        ['1', '참여 화면 점검', '연수 날짜·시간·활성 상태를 확인하고 공유 링크를 휴대폰에서도 열어 봅니다.', '지난 고정 연수는 활성 상태인 동안 접수되며 미래 연수는 날짜가 될 때까지 표시되지 않습니다.'],
         ['2', '서명 기록 확인', '서명 기록에서 연수를 선택하면 해당 연수 날짜가 자동으로 설정됩니다.', '잘못 제출된 기록은 개별 삭제할 수 있습니다.'],
         ['3', '출력 미리보기', '연수 목록의 출력 버튼에서 날짜·열 수·정렬·서명률·PDF/엑셀/인쇄를 고릅니다.', '실제 서명 이미지가 들어간 A4 미리보기를 먼저 확인합니다.'],
         ['4', '파일 보관', 'PDF 또는 엑셀을 내려받아 학교가 정한 보관 위치에 저장합니다.', '인쇄하기만 실행한 작업은 원본 삭제 조건을 충족하지 않습니다.'],
