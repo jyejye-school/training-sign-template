@@ -326,12 +326,7 @@ function renderTrainings() {
 }
 
 function publicTrainingTimeLabel(training) {
-  const label = trainingTimeLabel(training);
-  const serverDate = state.publicData?.serverDate || todaySeoul();
-  if (!training?.daily && /^\d{4}-\d{2}-\d{2}$/.test(String(training.date || '')) && training.date < serverDate) {
-    return `${label} · 지금 서명 접수 중`;
-  }
-  return label;
+  return trainingTimeLabel(training);
 }
 
 function selectTraining(trainingId) {
