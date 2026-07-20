@@ -290,9 +290,11 @@ function applySettings(settings) {
   $('noticeText').textContent = settings.notice || '';
   setHidden($('noticePanel'), !settings.notice);
   const favicon = String(settings.faviconData || '');
+  const faviconUrl = favicon || DEFAULT_FAVICON_URL;
   const faviconLink = $('faviconLink');
   faviconLink.type = favicon ? 'image/png' : 'image/svg+xml';
-  faviconLink.href = favicon || DEFAULT_FAVICON_URL;
+  faviconLink.href = faviconUrl;
+  $('brandMarkIcon').src = faviconUrl;
 }
 
 function showPanel(panelId) {
@@ -572,7 +574,10 @@ function renderAdminSection(section) {
     populateTrainingSelects();
   }
   if (section === 'staff') renderStaffAdmin();
-  if (section === 'settings') fillSettingsForm();
+  if (section === 'settings') {
+    fillSettingsForm();
+    applySettings(state.adminData.settings || {});
+  }
   if (section === 'share') renderShareAdmin();
 }
 

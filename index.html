@@ -8,21 +8,17 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'">
   <title>학교 연수 전자서명</title>
   <link id="faviconLink" rel="icon" type="image/svg+xml" href="favicon.svg?v=20260720.5">
-  <link rel="stylesheet" href="assets/styles.css?v=20260720.1">
+  <link rel="stylesheet" href="assets/styles.css?v=20260720.2">
   <script src="assets/config.js"></script>
   <script src="vendor/qrcode.js" defer></script>
   <script src="vendor/xlsx.full.min.js" defer></script>
-  <script type="module" src="assets/app.js?v=20260720.5"></script>
+  <script type="module" src="assets/app.js?v=20260720.6"></script>
 </head>
 <body data-panel="loadingPanel">
   <a class="skip-link" href="#mainContent">본문으로 바로가기</a>
   <header class="site-header">
     <div class="brand-mark" aria-hidden="true">
-      <svg class="brand-mark-icon" viewBox="0 0 64 64" focusable="false">
-        <path d="M18 44.5c7.6-1.7 13.3-4.9 18.2-10.1l12.1-12.8a4.8 4.8 0 0 0-6.9-6.7L29.3 27.7c-4.9 5.2-8 10.9-9.5 17.1l-1.8-.3Z" fill="currentColor"/>
-        <path d="m37.5 19 7.2 7" fill="none" stroke="var(--mark-blue)" stroke-width="3.2" stroke-linecap="round"/>
-        <path d="M14 50h36" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
-      </svg>
+      <img id="brandMarkIcon" class="brand-mark-icon" src="favicon.svg?v=20260720.5" alt="">
     </div>
     <div class="brand-copy">
       <p id="schoolName" class="school-name">학교 연수 전자서명</p>
@@ -294,7 +290,7 @@
             <div class="span-two favicon-setting" role="group" aria-labelledby="settingsFaviconLabel">
               <div>
                 <p id="settingsFaviconLabel" class="field-label">브라우저 파비콘</p>
-                <p class="form-hint">PNG·JPG·WebP, 최대 2MB · 브라우저 탭에만 표시됩니다.</p>
+                <p class="form-hint">PNG·JPG·WebP, 최대 2MB · 브라우저 탭과 학교 이름 왼쪽에 함께 표시됩니다.</p>
               </div>
               <img id="settingsFaviconPreview" class="favicon-preview" src="favicon.svg?v=20260720.5" alt="현재 파비콘 미리보기">
               <div class="favicon-actions">

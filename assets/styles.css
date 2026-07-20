@@ -1,5 +1,4 @@
 :root {
-  --mark-blue: #2563eb;
   --brand: #315c54;
   --brand-dark: #1f403a;
   --brand-soft: #e7f0ed;
@@ -33,8 +32,8 @@ h2, h3 { letter-spacing: -.025em; }
 .skip-link:focus { top: 1rem; }
 .hidden { display: none !important; }
 .site-header { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: .85rem; min-height: 76px; padding: .7rem clamp(1rem, 3vw, 2.4rem); border-bottom: 1px solid rgba(49, 92, 84, .13); background: rgba(248, 251, 250, .9); backdrop-filter: blur(16px); }
-.brand-mark { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 15px 15px 15px 4px; background: var(--mark-blue); color: white; font-size: .79rem; font-weight: 900; box-shadow: 0 8px 22px rgba(37, 99, 235, .24); }
-.brand-mark-icon { display: block; width: 32px; height: 32px; }
+.brand-mark { display: grid; place-items: center; flex: 0 0 auto; width: 48px; height: 48px; overflow: hidden; border-radius: 14px; background: #fff; box-shadow: 0 8px 22px rgba(37, 99, 235, .24); }
+.brand-mark-icon { display: block; width: 100%; height: 100%; object-fit: contain; }
 .brand-copy { min-width: 0; }
 .school-name { margin: 0; font-weight: 900; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .school-meta { display: flex; align-items: center; gap: .32rem; min-width: 0; margin-top: .15rem; color: var(--muted); font-size: .78rem; }
@@ -265,8 +264,7 @@ body[data-panel="trainingPanel"] .site-footer { flex: 0 0 auto; padding: .55rem 
 
 @media (max-width: 720px) {
   .site-header { min-height: 62px; padding: .45rem .7rem; gap: .6rem; }
-  .brand-mark { width: 40px; height: 40px; border-radius: 13px 13px 13px 4px; }
-  .brand-mark-icon { width: 27px; height: 27px; }
+  .brand-mark { width: 40px; height: 40px; border-radius: 11px; }
   .school-name { font-size: .88rem; }
   .school-meta { gap: .22rem; font-size: .68rem; }
   .icon-button { padding: .48rem .55rem; font-size: .76rem; }
