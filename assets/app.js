@@ -23,7 +23,7 @@ let shareToken = DEMO ? 'DEMO_TOKEN_1234567890123456' : parseShareToken(location
 const baseUrl = `${location.origin}${location.pathname}`;
 const EXPORT_SETTINGS_KEY = 'training-sign:export-settings';
 const ADMIN_SYNC_MS = 30000;
-const DEFAULT_FAVICON_URL = 'favicon.svg?v=20260720.2';
+const DEFAULT_FAVICON_URL = 'favicon.svg?v=20260720.3';
 const FAVICON_MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const FAVICON_MAX_PNG_BYTES = 32 * 1024;
 const ADMIN_SECTION_FOR_TAB = Object.freeze({
@@ -1249,7 +1249,7 @@ function fillSettingsForm() {
 function renderFaviconSetting(message = '') {
   const favicon = state.settingsFaviconData;
   $('settingsFaviconPreview').src = favicon || DEFAULT_FAVICON_URL;
-  $('settingsFaviconStatus').textContent = message || (favicon ? '사용자 지정 아이콘이 선택되어 있습니다.' : '현재 문서·서명 모양의 파란색 기본 아이콘을 사용합니다.');
+  $('settingsFaviconStatus').textContent = message || (favicon ? '사용자 지정 아이콘이 선택되어 있습니다.' : '현재 손글씨 모양의 파란색 기본 아이콘을 사용합니다.');
 }
 
 function loadImageFromFile(file) {

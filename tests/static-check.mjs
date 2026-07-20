@@ -66,9 +66,9 @@ expect(/오늘 참여할 수 있는 연수가 없습니다/.test(index), '연수
 expect(/날짜·시간·활성 상태/.test(index), '연수가 없을 때 관리자 확인 안내가 없습니다.');
 expect(/rel="icon"[^>]+favicon\.svg/.test(index), '브라우저 파비콘 연결이 없습니다.');
 expect(/id="faviconLink"/.test(index) && /faviconLink\.href = favicon \|\| DEFAULT_FAVICON_URL/.test(app), '공개 설정에 따른 동적 파비콘 적용이 없습니다.');
-expect(/href="favicon\.svg\?v=20260720\.2"/.test(index) && /DEFAULT_FAVICON_URL = 'favicon\.svg\?v=20260720\.2'/.test(app), '기본 파비콘 캐시 버전이 화면과 스크립트에서 일치하지 않습니다.');
+expect(/href="favicon\.svg\?v=20260720\.3"/.test(index) && /DEFAULT_FAVICON_URL = 'favicon\.svg\?v=20260720\.3'/.test(app), '기본 파비콘 캐시 버전이 화면과 스크립트에서 일치하지 않습니다.');
 expect(/<title[^>]*>연수 전자서명<\/title>/.test(favicon), '기본 파비콘에 용도를 설명하는 제목이 없습니다.');
-expect(/id="document-symbol"/.test(favicon) && /id="signature-symbol"/.test(favicon) && /id="check-symbol"/.test(favicon), '기본 파비콘이 문서·서명·완료 표시를 함께 보여주지 않습니다.');
+expect(/id="brand-frame"/.test(favicon) && /id="writing-hand-symbol"/.test(favicon) && /✍️/.test(favicon), '기본 파비콘이 손글씨 이모지와 파란색 브랜드 틀을 함께 보여주지 않습니다.');
 expect(/id="staffNames"[^>]*placeholder="띄어쓰기·쉼표·줄바꿈으로 여러 명 구분"/.test(index), '구성원 연속 입력 안내가 없습니다.');
 expect(/compositionstart/.test(app) && /compositionend/.test(app) && /normalizeNameEntryText/.test(app), '한글 조합을 보호하는 구성원 입력 정리가 없습니다.');
 expect(/id="settingsFaviconFile"[^>]*accept="image\/png,image\/jpeg,image\/webp/.test(index), '관리자 파비콘 이미지 선택기가 없습니다.');

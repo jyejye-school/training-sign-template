@@ -1,9 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="faviconTitle">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="faviconTitle">
   <title id="faviconTitle">연수 전자서명</title>
-  <rect width="64" height="64" rx="15" fill="#2563eb"/>
-  <path id="document-symbol" d="M17 7h22l12 12v34a4 4 0 0 1-4 4H17a4 4 0 0 1-4-4V11a4 4 0 0 1 4-4Z" fill="#fff"/>
-  <path d="m39 7 12 12H43a4 4 0 0 1-4-4V7Z" fill="#bfdbfe"/>
-  <path id="signature-symbol" d="M20 38c3.3-8.2 6-8.5 6.8-2 .7 5.5 3.2 6.3 6.3 1.1 2.1-3.6 3.7-2.9 4.7.5 1.1 3.7 3.8 3.5 7.1-.8" fill="none" stroke="#2563eb" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle id="approval-symbol" cx="46" cy="48" r="11" fill="#1e40af"/>
-  <path id="check-symbol" d="m40.8 47.8 3.2 3.1 7-7.8" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect id="brand-frame" x="3" y="3" width="94" height="94" rx="24" fill="#eff6ff" stroke="#2563eb" stroke-width="6"/>
+  <text id="writing-hand-symbol" x="50" y="78" font-size="76" text-anchor="middle" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">✍️</text>
 </svg>
