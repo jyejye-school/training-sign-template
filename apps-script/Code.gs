@@ -5,7 +5,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '1.6.2',
+  VERSION: '1.7.0',
   TIME_ZONE: 'Asia/Seoul',
   DATA_FILE: '학교 연수 전자서명 데이터',
   GUIDE_SHEET: '사용설명서',
@@ -24,7 +24,7 @@ const APP = Object.freeze({
 const SHEETS = Object.freeze({
   SETTINGS: { name: '설정', headers: ['key', 'value'] },
   STAFF: { name: '구성원', headers: ['id', 'department', 'name', 'active', 'sortOrder', 'createdAt'] },
-  TRAININGS: { name: '연수', headers: ['id', 'title', 'target', 'date', 'daily', 'startTime', 'endTime', 'active', 'sortOrder', 'createdAt', 'updatedAt'] },
+  TRAININGS: { name: '연수', headers: ['id', 'title', 'target', 'date', 'daily', 'startTime', 'endTime', 'active', 'sortOrder', 'createdAt', 'updatedAt', 'audienceMode', 'audienceDepartments'] },
   SIGNATURES: { name: '서명', headers: ['id', 'trainingId', 'staffId', 'signDate', 'signTime', 'department', 'name', 'imageFileId', 'createdAt', 'scopeDate'] },
   EXPORTS: { name: '출력 작업', headers: ['jobId', 'trainingId', 'trainingTitle', 'date', 'sort', 'columns', 'showRate', 'status', 'progress', 'total', 'tempSpreadsheetId', 'pdfFileId', 'xlsxFileId', 'createdAt', 'updatedAt', 'error', 'purgedAt', 'outputType', 'previewFileId', 'printOpenedAt', 'signatureSnapshot'] },
   AUDIT: { name: '감사 기록', headers: ['timestamp', 'action', 'target', 'count', 'detail'] }
@@ -182,7 +182,7 @@ function dispatch_(request) {
   if (action === 'finalize_export') return finalizeExport_(request.jobId);
   if (action === 'record_print_opened') return recordPrintOpened_(request.jobId);
   if (action === 'download_export_chunk') return downloadExportChunk_(request.jobId, request.format, request.offset, request.chunkSize);
-  if (action === 'purge_originals') return purgeOriginals_(request.jobId, request.confirmation);
+  if (action === 'purge_originals') return withAdminMutationLock_(function() { return purgeOriginals_(request.jobId, request.confirmation); });
   apiError_('UNKNOWN_ACTION', '지원하지 않는 작업입니다.');
 }
 
@@ -380,14 +380,18 @@ function getPublicData_(shareToken) {
   const privacyReady = privacyReady_(settings);
   if (!privacyReady) apiError_('PRIVACY_NOT_READY', '관리자가 개인정보 처리 안내를 완료하지 않았습니다.');
   const today = today_();
-  const staff = readRows_(SHEETS.STAFF)
+  const activeStaff = readRows_(SHEETS.STAFF)
     .filter(row => bool_(row.active))
-    .sort(staffSort_)
-    .map(publicStaff_);
-  const trainings = readRows_(SHEETS.TRAININGS)
+    .sort(staffSort_);
+  const trainingRows = readRows_(SHEETS.TRAININGS)
     .filter(function(row) { return isTrainingPublicOnDate_(row, today); })
-    .sort(orderSort_)
-    .map(publicTraining_);
+    .sort(orderSort_);
+  const staff = activeStaff
+    .filter(function(person) {
+      return trainingRows.some(function(training) { return trainingTargetsStaff_(training, person); });
+    })
+    .map(publicStaff_);
+  const trainings = trainingRows.map(publicTraining_);
   return { settings: settings, staff: staff, trainings: trainings, privacyReady: true, serverDate: today };
 }
 
@@ -407,11 +411,10 @@ function submitSignature_(request) {
   const training = findRow_(SHEETS.TRAININGS, 'id', trainingId);
   const person = findRow_(SHEETS.STAFF, 'id', staffId);
   validateSigningWindow_(training, person);
-  const now = new Date();
-  const date = formatDate_(now, 'yyyy-MM-dd');
-  const time = formatDate_(now, 'HH:mm:ss');
+  const fileCreatedAt = new Date();
+  const fileDate = formatDate_(fileCreatedAt, 'yyyy-MM-dd');
   const folder = getOrCreateTrainingFolder_(trainingId, training.title);
-  const fileName = safeFileName_(date + '_' + person.department + '_' + person.name) + '.png';
+  const fileName = safeFileName_(fileDate + '_' + person.department + '_' + person.name) + '.png';
   const file = folder.createFile(Utilities.newBlob(bytes, 'image/png', fileName));
 
   const lock = LockService.getScriptLock();
@@ -423,6 +426,9 @@ function submitSignature_(request) {
     const freshTraining = findRow_(SHEETS.TRAININGS, 'id', trainingId);
     const freshPerson = findRow_(SHEETS.STAFF, 'id', staffId);
     validateSigningWindow_(freshTraining, freshPerson);
+    const now = new Date();
+    const date = formatDate_(now, 'yyyy-MM-dd');
+    const time = formatDate_(now, 'HH:mm:ss');
     const scopeDate = trainingScopeDate_(freshTraining, date);
     const duplicate = readRows_(SHEETS.SIGNATURES).some(function(row) {
       return row.trainingId === trainingId &&
@@ -447,6 +453,7 @@ function submitSignature_(request) {
 function validateSigningWindow_(training, person) {
   if (!training || !bool_(training.active)) apiError_('TRAINING_CLOSED', '현재 서명할 수 없는 연수입니다.');
   if (!person || !bool_(person.active)) apiError_('STAFF_NOT_FOUND', '구성원 명단에서 확인할 수 없습니다.');
+  if (!trainingTargetsStaff_(training, person)) apiError_('STAFF_NOT_TARGET', '이 연수의 서명 대상이 아닙니다.');
   const today = today_();
   const trainingDate = sheetDateText_(training.date);
   const startTime = sheetTimeText_(training.startTime, false);
@@ -465,6 +472,7 @@ function validateSigningWindow_(training, person) {
 
 function isTrainingPublicOnDate_(training, today) {
   if (!training || !bool_(training.active)) return false;
+  if (trainingAudienceMode_(training) === 'invalid') return false;
   if (bool_(training.daily)) return true;
   const trainingDate = sheetDateText_(training.date);
   return /^\d{4}-\d{2}-\d{2}$/.test(trainingDate) && trainingDate <= today;
@@ -496,7 +504,7 @@ function getAdminData_() {
     .sort(function(a, b) { return String(b.createdAt).localeCompare(String(a.createdAt)); })
     .map(publicJob_);
   return {
-    settings: readSettings_(), staff: staff, trainings: trainings, exports: exports,
+    settings: readSettings_(), staff: staff, departments: listActiveDepartments_(), trainings: trainings, exports: exports,
     shareToken: shareToken, shareUrl: buildShareUrl_(frontendUrl, shareToken),
     stats: { staff: staff.length, trainings: trainings.length, signatures: signatures.length }
   };
@@ -527,13 +535,14 @@ function getAdminSection_(section) {
     return {
       section: name,
       trainings: readRows_(SHEETS.TRAININGS).sort(orderSort_).map(publicTraining_),
+      departments: listActiveDepartments_(),
       exports: readRows_(SHEETS.EXPORTS)
         .sort(function(a, b) { return String(b.createdAt).localeCompare(String(a.createdAt)); })
         .map(publicJob_)
     };
   }
   if (name === 'staff') {
-    return { section: name, staff: readRows_(SHEETS.STAFF).sort(staffSort_).map(publicStaff_) };
+    return { section: name, staff: readRows_(SHEETS.STAFF).sort(staffSort_).map(publicStaff_), departments: listActiveDepartments_() };
   }
   if (name === 'exports') {
     return {
@@ -605,7 +614,39 @@ function normalizeTraining_(input) {
   if (startTime && !/^\d{2}:\d{2}$/.test(startTime)) apiError_('VALIDATION', '시작 시각이 올바르지 않습니다.');
   if (endTime && !/^\d{2}:\d{2}$/.test(endTime)) apiError_('VALIDATION', '종료 시각이 올바르지 않습니다.');
   if (startTime && endTime && startTime >= endTime) apiError_('VALIDATION', '종료 시각은 시작 시각보다 늦어야 합니다.');
-  return { id: input && input.id ? id_(input.id, '연수') : '', title: title, target: '', date: daily ? date || today_() : date, daily: daily, startTime: startTime, endTime: endTime, active: bool_(input && input.active) };
+  const normalized = { id: input && input.id ? id_(input.id, '연수') : '', title: title, target: '', date: daily ? date || today_() : date, daily: daily, startTime: startTime, endTime: endTime, active: bool_(input && input.active) };
+  const hasAudienceMode = input && Object.prototype.hasOwnProperty.call(input, 'audienceMode');
+  const hasAudienceDepartments = input && Object.prototype.hasOwnProperty.call(input, 'audienceDepartments');
+  const hasAudienceInput = hasAudienceMode || hasAudienceDepartments;
+  if (hasAudienceInput) {
+    if (!hasAudienceMode || !hasAudienceDepartments) {
+      apiError_('VALIDATION', '서명 대상 설정 형식이 올바르지 않습니다.');
+    }
+    const audienceMode = String(input.audienceMode || '');
+    if (audienceMode !== 'all' && audienceMode !== 'departments') {
+      apiError_('VALIDATION', '서명 대상 방식이 올바르지 않습니다.');
+    }
+    if (!Array.isArray(input.audienceDepartments)) {
+      apiError_('VALIDATION', '서명 대상 부서 형식이 올바르지 않습니다.');
+    }
+    if (
+      input.audienceDepartments.length > 200 ||
+      input.audienceDepartments.some(function(value) {
+        if (typeof value !== 'string') return true;
+        const department = value.trim();
+        return !department || department.length > 50;
+      })
+    ) {
+      apiError_('VALIDATION', '서명 대상 부서 이름을 확인해 주세요.');
+    }
+    const departments = normalizeAudienceDepartments_(input.audienceDepartments);
+    if (audienceMode === 'departments' && !departments.length) {
+      apiError_('VALIDATION', '서명 대상 부서를 하나 이상 선택해 주세요.');
+    }
+    normalized.audienceMode = audienceMode;
+    normalized.audienceDepartments = audienceMode === 'departments' ? JSON.stringify(departments) : '';
+  }
+  return normalized;
 }
 
 function deleteTraining_(trainingId) {
@@ -707,12 +748,30 @@ function renameDepartment_(oldDepartment, newDepartment) {
   sheet.getRange(2, 1, rows.length, SHEETS.STAFF.headers.length)
     .setValues(rows.map(function(item) { return objectValues_(SHEETS.STAFF.headers, item.data); }));
   invalidateRows_(SHEETS.STAFF);
-  audit_('rename_department', oldName, updated, newName);
+  const trainingRows = readRowsWithNumbers_(SHEETS.TRAININGS);
+  const changedTrainings = [];
+  trainingRows.forEach(function(item) {
+    if (trainingAudienceMode_(item.data) !== 'departments') return;
+    const before = trainingAudienceDepartments_(item.data);
+    if (before.indexOf(oldName) < 0) return;
+    const after = normalizeAudienceDepartments_(before.map(function(department) {
+      return department === oldName ? newName : department;
+    }));
+    item.data.audienceDepartments = JSON.stringify(after);
+    changedTrainings.push(publicTraining_(item.data));
+  });
+  if (changedTrainings.length) {
+    sheet_(SHEETS.TRAININGS).getRange(2, 1, trainingRows.length, SHEETS.TRAININGS.headers.length)
+      .setValues(trainingRows.map(function(item) { return objectValues_(SHEETS.TRAININGS.headers, item.data); }));
+    invalidateRows_(SHEETS.TRAININGS);
+  }
+  audit_('rename_department', oldName, updated, newName + ' · 연수 대상 ' + changedTrainings.length + '건');
   return {
     updated: updated,
     oldDepartment: oldName,
     newDepartment: newName,
-    people: rows.filter(function(item) { return item.data.department === newName; }).map(function(item) { return publicStaff_(item.data); })
+    people: rows.filter(function(item) { return item.data.department === newName; }).map(function(item) { return publicStaff_(item.data); }),
+    trainings: changedTrainings
   };
 }
 
@@ -738,7 +797,9 @@ function getTrainingSignatureStatus_(trainingId, date) {
   if (!training) apiError_('NOT_FOUND', '연수를 찾을 수 없습니다.');
   assertTrainingRequestDate_(training, signDate, '현황');
 
-  const activeStaff = readRows_(SHEETS.STAFF).filter(function(person) { return bool_(person.active); });
+  const activeStaff = readRows_(SHEETS.STAFF).filter(function(person) {
+    return bool_(person.active) && trainingTargetsStaff_(training, person);
+  });
   const signatures = readRows_(SHEETS.SIGNATURES)
     .filter(function(record) {
       return String(record.trainingId) === id && signatureMatchesTrainingDate_(record, training, signDate);
@@ -864,7 +925,7 @@ function startExport_(request) {
     sort: sort, columns: columns, showRate: showRate, status: 'queued', progress: 0, total: totalImages,
     tempSpreadsheetId: temporary.getId(), pdfFileId: '', xlsxFileId: '', createdAt: now, updatedAt: now, error: '', purgedAt: '',
     outputType: outputType, previewFileId: '', printOpenedAt: '',
-    signatureSnapshot: JSON.stringify(scopedSignatures.map(function(signature) { return String(signature.id || ''); }).filter(Boolean))
+    signatureSnapshot: JSON.stringify(roster.map(function(row) { return String(row.signatureId || ''); }).filter(Boolean))
   };
   appendObject_(SHEETS.EXPORTS, job);
   audit_('start_export', job.jobId, roster.length, training.title + ' ' + date);
@@ -888,23 +949,31 @@ function buildExportRoster_(trainingId, date, sort, training, scopedSignatures) 
     const staffId = String(row.staffId || '');
     if (!signedByStaff.has(staffId)) signedByStaff.set(staffId, row);
   });
+  const allStaff = readRows_(SHEETS.STAFF);
+  const staffById = new Map();
+  allStaff.forEach(function(person) { staffById.set(String(person.id || ''), person); });
   const includedStaff = new Set();
-  const roster = readRows_(SHEETS.STAFF).filter(function(row) { return bool_(row.active); }).map(function(person) {
+  const roster = allStaff.filter(function(person) {
+    return bool_(person.active) && trainingTargetsStaff_(training, person);
+  }).map(function(person) {
     const staffId = String(person.id || '');
     const signature = signedByStaff.get(staffId);
     includedStaff.add(staffId);
     return {
       staffId: person.id, department: person.department, name: person.name,
       time: signature ? exportSignatureTime_(signature, training, date) : '', fileId: signature ? signature.imageFileId : '',
-      sortOrder: number_(person.sortOrder), createdAt: person.createdAt || ''
+      signatureId: signature ? signature.id : '', sortOrder: number_(person.sortOrder), createdAt: person.createdAt || ''
     };
   });
   signatures.forEach(function(signature, index) {
-    if (includedStaff.has(String(signature.staffId || ''))) return;
+    const staffId = String(signature.staffId || '');
+    if (includedStaff.has(staffId)) return;
+    const currentPerson = staffById.get(staffId);
+    if (currentPerson && bool_(currentPerson.active)) return;
     roster.push({
       staffId: signature.staffId, department: signature.department, name: signature.name,
       time: exportSignatureTime_(signature, training, date), fileId: signature.imageFileId,
-      sortOrder: 1000000 + index, createdAt: signature.createdAt || ''
+      signatureId: signature.id, sortOrder: 1000000 + index, createdAt: signature.createdAt || ''
     });
   });
   roster.sort(function(a, b) {
@@ -1081,26 +1150,7 @@ function continueExport_(jobId) {
     const imageData = readExportImageBatch_(spreadsheet, start);
     const fetchedImages = fetchPrivateDriveImages_(imageData.batch);
     const rowsPerBlock = exportRowsPerBlock_(output, job);
-    fetchedImages.forEach(function(item) {
-      const layoutIndex = number_(item.layoutIndex);
-      const position = exportPosition_(layoutIndex, rowsPerBlock);
-      const column = 4 + position.block * 4;
-      if (item.blob) {
-        try {
-          const image = output.insertImage(item.blob, column, position.row);
-          const imageWidth = number_(job.columns) === 1 ? 215 : number_(job.columns) === 3 ? 104 : 140;
-          image.setWidth(imageWidth).setHeight(number_(job.columns) === 3 ? 44 : 50);
-          return;
-        } catch (ignore) {
-          // The placeholder below keeps one unreadable image from failing the entire export.
-        }
-      }
-      try {
-        output.getRange(position.row, column).setValue('이미지 없음').setFontColor('#b4473d').setFontSize(8);
-      } catch (ignore) {
-        // Continue processing the other signatures even if a placeholder cannot be written.
-      }
-    });
+    insertExportImageBatch_(output, fetchedImages, job, rowsPerBlock);
     const nextProgress = start + imageData.processedCount;
     const nextJob = Object.assign({}, job, {
       progress: nextProgress,
@@ -1132,6 +1182,29 @@ function continueExport_(jobId) {
     return publicJob_(job);
   } finally {
     releaseExportLease_(id, leaseToken);
+  }
+}
+
+function insertExportImageBatch_(output, fetchedImages, job, rowsPerBlock) {
+  if (fetchedImages.some(function(item) { return !item.blob; })) {
+    throw new Error('일부 서명 이미지를 불러오지 못했습니다. 원본 삭제를 막기 위해 출력을 중단했습니다. 다시 시도해 주세요.');
+  }
+  const inserted = [];
+  try {
+    fetchedImages.forEach(function(item) {
+      const layoutIndex = number_(item.layoutIndex);
+      const position = exportPosition_(layoutIndex, rowsPerBlock);
+      const column = 4 + position.block * 4;
+      const image = output.insertImage(item.blob, column, position.row);
+      inserted.push(image);
+      const imageWidth = number_(job.columns) === 1 ? 215 : number_(job.columns) === 3 ? 104 : 140;
+      image.setWidth(imageWidth).setHeight(number_(job.columns) === 3 ? 44 : 50);
+    });
+  } catch (error) {
+    inserted.forEach(function(image) {
+      try { image.remove(); } catch (ignore) { /* Best effort rollback before retry. */ }
+    });
+    throw new Error('서명 이미지를 배치하지 못했습니다. 원본 삭제를 막기 위해 출력을 중단했습니다. 다시 시도해 주세요.');
   }
 }
 
@@ -1492,6 +1565,9 @@ function parseSignatureSnapshot_(value) {
 function signatureBelongsToExportPurge_(signature, job, training, snapshotIds) {
   if (!signature || !job || signature.trainingId !== job.trainingId) return false;
   if (snapshotIds) return snapshotIds.has(String(signature.id || ''));
+  const signatureCreatedAt = new Date(String(signature.createdAt || '')).getTime();
+  const exportStartedAt = new Date(String(job.createdAt || '')).getTime();
+  if (!signatureCreatedAt || !exportStartedAt || signatureCreatedAt > exportStartedAt) return false;
   return sheetDateText_(signature.scopeDate || signature.signDate) === sheetDateText_(job.date);
 }
 
@@ -1680,7 +1756,7 @@ function ensureGuideSheet_(spreadsheet, rebuild) {
         ['1', '관리자 비밀번호 만들기', '초기 설정 코드와 관리자 비밀번호를 입력합니다.', '숫자 4자리 또는 문자·숫자를 포함한 10자 이상 비밀번호를 사용할 수 있습니다.'],
         ['2', '기관 설정 입력', '기관 설정에서 학교명·부제목·안내문·개인정보 처리 안내·대표 색상을 저장합니다.', '개인정보 안내가 비어 있으면 연수를 활성화할 수 없습니다.'],
         ['3', '구성원 등록', '구성원에서 부서와 성명을 등록합니다.', '이름은 띄어쓰기·쉼표·줄바꿈으로 여러 명을 한 번에 입력하거나 엑셀·CSV를 가져올 수 있습니다.'],
-        ['4', '연수 등록', '연수에서 새 연수를 만들고 날짜·시간·활성 상태를 정합니다.', '지난 날짜의 고정 연수도 활성화하면 재수합할 수 있으며 실제 제출 날짜·시각은 따로 기록됩니다.'],
+        ['4', '연수 등록', '연수에서 날짜·시간·활성 상태와 서명 대상(전체 구성원 또는 부서 선택)을 정합니다.', '선택한 부서에 나중에 등록되는 구성원도 자동으로 대상에 포함됩니다. 지난 연수도 활성화하면 재수합할 수 있습니다.'],
         ['5', '공유 링크 배포', '공유·보안에서 참여 링크와 QR을 복사해 학교 내부에 안내합니다.', '링크를 받은 사람은 별도 Google 계정 없이 접속합니다.']
       ]
     },
@@ -1917,10 +1993,72 @@ function publicStaff_(row) {
   return { id: String(row.id), department: String(row.department), name: String(row.name), active: bool_(row.active), sortOrder: number_(row.sortOrder) };
 }
 
+function normalizeAudienceDepartments_(value) {
+  let source = value;
+  if (!Array.isArray(source)) {
+    try { source = JSON.parse(String(source || '[]')); }
+    catch (error) { source = []; }
+  }
+  if (!Array.isArray(source)) return [];
+  const seen = new Set();
+  const departments = [];
+  source.forEach(function(item) {
+    const department = String(item || '').trim();
+    const key = department.toLowerCase();
+    if (!department || department.length > 50 || seen.has(key)) return;
+    seen.add(key);
+    departments.push(department);
+  });
+  return departments.slice(0, 200);
+}
+
+function trainingAudienceMode_(training) {
+  const mode = String(training && training.audienceMode || '').trim();
+  if (!mode || mode === 'all') return 'all';
+  if (mode === 'departments') return 'departments';
+  return 'invalid';
+}
+
+function trainingAudienceDepartments_(training) {
+  return trainingAudienceMode_(training) === 'departments'
+    ? normalizeAudienceDepartments_(training && training.audienceDepartments)
+    : [];
+}
+
+function trainingTargetsStaff_(training, person) {
+  const mode = trainingAudienceMode_(training);
+  if (mode === 'all') return true;
+  if (mode !== 'departments') return false;
+  const department = String(person && person.department || '').trim();
+  const key = department.toLowerCase();
+  return trainingAudienceDepartments_(training).some(function(item) {
+    return String(item || '').trim().toLowerCase() === key;
+  });
+}
+
+function listActiveDepartments_() {
+  const seen = new Set();
+  const departments = [];
+  readRows_(SHEETS.STAFF)
+    .filter(function(person) { return bool_(person.active); })
+    .sort(staffSort_)
+    .forEach(function(person) {
+      const department = String(person.department || '').trim();
+      const key = department.toLowerCase();
+      if (!department || seen.has(key)) return;
+      seen.add(key);
+      departments.push(department);
+    });
+  return departments;
+}
+
 function publicTraining_(row) {
+  const storedAudienceMode = trainingAudienceMode_(row);
+  const audienceMode = storedAudienceMode === 'all' ? 'all' : 'departments';
   return {
     id: String(row.id), title: String(row.title), date: sheetDateText_(row.date), daily: bool_(row.daily),
-    startTime: sheetTimeText_(row.startTime, false), endTime: sheetTimeText_(row.endTime, false), active: bool_(row.active), sortOrder: number_(row.sortOrder)
+    startTime: sheetTimeText_(row.startTime, false), endTime: sheetTimeText_(row.endTime, false), active: bool_(row.active), sortOrder: number_(row.sortOrder),
+    audienceMode: audienceMode, audienceDepartments: trainingAudienceDepartments_(row)
   };
 }
 

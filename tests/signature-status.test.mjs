@@ -10,8 +10,10 @@ return {
   buildTrainingSignatureStatus_: buildTrainingSignatureStatus_,
   getTrainingSignatureStatus_: getTrainingSignatureStatus_,
   startExport_: startExport_,
+  buildExportRoster_: buildExportRoster_,
   dispatch_: dispatch_,
   readExportImageBatch_: readExportImageBatch_,
+  insertExportImageBatch_: insertExportImageBatch_,
   normalizeDriveDownloadResponse_: normalizeDriveDownloadResponse_,
   continueExport_: continueExport_,
   configureStatus: function(training, staff, signatures) {
@@ -31,6 +33,12 @@ return {
     findRow_ = function() { return job; };
     acquireExportLease_ = function() { leaseCalls += 1; return ''; };
     return function() { return leaseCalls; };
+  },
+  configureExportRoster: function(staff) {
+    readRows_ = function(definition) {
+      if (definition === SHEETS.STAFF) return staff;
+      return [];
+    };
   }
 };`);
 
@@ -121,6 +129,58 @@ test('현황 API는 관리자 세션을 요구하고 고정 날짜와 활성 명
   assert.ok(!JSON.stringify(result).includes('private-'));
 });
 
+test('미서명 현황은 선택 부서만 대상으로 계산하고 나머지 서명은 대상 외 건수로 남긴다', () => {
+  const harness = createHarness();
+  const training = {
+    id: 'training-0001', date: '2026-07-20', daily: false,
+    audienceMode: 'departments', audienceDepartments: '["교무부"]'
+  };
+  harness.configureStatus(
+    training,
+    [
+      { id: 'teacher', department: '교무부', name: '김교사', active: true, sortOrder: 1 },
+      { id: 'office', department: '행정실', name: '박주무관', active: true, sortOrder: 2 },
+      { id: 'inactive', department: '교무부', name: '비활성', active: false, sortOrder: 3 }
+    ],
+    [
+      { trainingId: training.id, staffId: 'teacher', signDate: training.date, signTime: '09:10:00', createdAt: '1' },
+      { trainingId: training.id, staffId: 'office', signDate: training.date, signTime: '09:11:00', createdAt: '2' },
+      { trainingId: training.id, staffId: 'inactive', signDate: training.date, signTime: '09:12:00', createdAt: '3' }
+    ]
+  );
+  const result = harness.getTrainingSignatureStatus_(training.id, training.date);
+  assert.deepEqual(result.people.map(person => person.staffId), ['teacher']);
+  assert.deepEqual(result.summary, {
+    targetCount: 1,
+    signedCount: 1,
+    unsignedCount: 0,
+    rate: 100,
+    outsideRosterSignedCount: 2
+  });
+});
+
+test('출력은 현재 대상만 포함하고 활성 대상 외 서명은 보존하되 출력하지 않는다', () => {
+  const harness = createHarness();
+  const training = {
+    id: 'training-0001', date: '2026-07-20', daily: false,
+    audienceMode: 'departments', audienceDepartments: '["교무부"]'
+  };
+  harness.configureExportRoster([
+    { id: 'teacher', department: '교무부', name: '김교사', active: true, sortOrder: 1 },
+    { id: 'office', department: '행정실', name: '박주무관', active: true, sortOrder: 2 },
+    { id: 'inactive', department: '교무부', name: '퇴직자', active: false, sortOrder: 3 }
+  ]);
+  const roster = harness.buildExportRoster_(training.id, training.date, 'registration', training, [
+    { id: 'sig-teacher', trainingId: training.id, staffId: 'teacher', department: '교무부', name: '김교사', signDate: training.date, signTime: '09:00:00', imageFileId: 'file-1', createdAt: '1' },
+    { id: 'sig-office', trainingId: training.id, staffId: 'office', department: '행정실', name: '박주무관', signDate: training.date, signTime: '09:01:00', imageFileId: 'file-2', createdAt: '2' },
+    { id: 'sig-inactive', trainingId: training.id, staffId: 'inactive', department: '교무부', name: '퇴직자', signDate: training.date, signTime: '09:02:00', imageFileId: 'file-3', createdAt: '3' },
+    { id: 'sig-deleted', trainingId: training.id, staffId: 'deleted', department: '연구부', name: '삭제된 구성원', signDate: training.date, signTime: '09:03:00', imageFileId: 'file-4', createdAt: '4' }
+  ]);
+  assert.deepEqual(roster.map(person => person.staffId), ['teacher', 'inactive', 'deleted']);
+  assert.deepEqual(roster.map(person => person.signatureId), ['sig-teacher', 'sig-inactive', 'sig-deleted']);
+  assert.ok(!roster.some(person => person.staffId === 'office'));
+});
+
 test('고정 날짜 연수는 다른 날짜의 출력 작업을 서버에서 만들지 않는다', () => {
   const harness = createHarness();
   harness.configureStatus({ id: 'training-0001', title: '고정 연수', date: '2026-07-20', daily: false }, [], []);
@@ -153,6 +213,26 @@ test('기존 _DATA 작업도 서명 이미지 목록을 30개씩 이어서 읽�
   assert.equal(first.total, 35);
   assert.equal(first.batch.length, 30);
   assert.equal(second.batch.length, 5);
+});
+
+test('서명 이미지 하나라도 누락되면 배치 전에 출력을 중단해 원본 삭제 가능한 파일을 만들지 않는다', () => {
+  const { insertExportImageBatch_ } = createHarness();
+  let insertCalls = 0;
+  const output = {
+    insertImage: function() {
+      insertCalls += 1;
+      return { setWidth: function() { return this; }, setHeight: function() { return this; }, remove: function() {} };
+    }
+  };
+
+  assert.throws(
+    () => insertExportImageBatch_(output, [
+      { layoutIndex: 0, blob: { bytes: [1] } },
+      { layoutIndex: 1, blob: null }
+    ], { columns: 2 }, 10),
+    /원본 삭제를 막기 위해 출력을 중단/
+  );
+  assert.equal(insertCalls, 0);
 });
 
 test('Range 응답은 실제 받은 바이트만큼 이어받고 Range 무시 시 한 번에 끝낸다', () => {

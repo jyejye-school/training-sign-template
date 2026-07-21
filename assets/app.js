@@ -1,19 +1,24 @@
 import {
+  activeDepartments,
   buildShareUrl,
   formatKoreanDate,
   formatKoreanHeaderDate,
   groupStaffByDepartment,
+  isStaffIncludedInTraining,
   isPrivacyReady,
   isValidAdminPassword,
   localDuplicateKey,
+  normalizeAudienceDepartments,
   normalizeNameEntryText,
   normalizeRosterRows,
   parseShareToken,
   splitNames,
+  staffForTraining,
   todaySeoul,
+  trainingAudienceMode,
   trainingTimeLabel,
   validateTraining
-} from './core.js?v=20260715.2';
+} from './core.js?v=20260721.1';
 
 const $ = id => document.getElementById(id);
 const config = window.TRAINING_SIGN_CONFIG || {};
@@ -73,8 +78,8 @@ const demoData = {
     privacyRetention: '선택한 출력 파일을 보관한 뒤 시스템 원본을 삭제합니다.'
   },
   trainings: [
-    { id: 'demo-training-1', title: '2026 개인정보 보호 연수', date: todaySeoul(), daily: false, startTime: '', endTime: '', active: true, sortOrder: 1 },
-    { id: 'demo-training-2', title: '학교 안전교육', date: todaySeoul(), daily: true, startTime: '09:00', endTime: '18:00', active: true, sortOrder: 2 }
+    { id: 'demo-training-1', title: '2026 개인정보 보호 연수', date: todaySeoul(), daily: false, startTime: '', endTime: '', active: true, sortOrder: 1, audienceMode: 'all', audienceDepartments: [] },
+    { id: 'demo-training-2', title: '행정실 업무 연수', date: todaySeoul(), daily: true, startTime: '09:00', endTime: '18:00', active: true, sortOrder: 2, audienceMode: 'departments', audienceDepartments: ['행정실'] }
   ],
   staff: [
     { id: 'staff-1', department: '교무기획부', name: '김하늘', active: true, sortOrder: 1 },
@@ -200,6 +205,7 @@ function demoRpc(action, payload) {
       settings: { ...demoData.settings },
       trainings: demoData.trainings.map(item => ({ ...item })),
       staff: demoData.staff.map(item => ({ ...item })),
+      departments: activeDepartments(demoData.staff),
       exports: [],
       shareToken: shareToken,
       shareUrl: buildShareUrl(baseUrl, shareToken),
@@ -217,8 +223,8 @@ function demoRpc(action, payload) {
     return Promise.resolve({ sessionToken: 'demo-session', expiresIn: 1800, adminData });
   }
   if (action === 'get_admin_section') {
-    if (payload.section === 'training_workspace') return Promise.resolve({ section: 'training_workspace', trainings: state.demoAdminData.trainings, exports: state.demoAdminData.exports });
-    if (payload.section === 'staff') return Promise.resolve({ section: 'staff', staff: state.demoAdminData.staff });
+    if (payload.section === 'training_workspace') return Promise.resolve({ section: 'training_workspace', trainings: state.demoAdminData.trainings, departments: state.demoAdminData.departments, exports: state.demoAdminData.exports });
+    if (payload.section === 'staff') return Promise.resolve({ section: 'staff', staff: state.demoAdminData.staff, departments: state.demoAdminData.departments });
     if (payload.section === 'exports') return Promise.resolve({ section: 'exports', exports: state.demoAdminData.exports });
     if (payload.section === 'settings') return Promise.resolve({ section: 'settings', settings: state.demoAdminData.settings });
     if (payload.section === 'trainings') return Promise.resolve({ section: 'trainings', trainings: state.demoAdminData.trainings });
@@ -231,7 +237,7 @@ function demoRpc(action, payload) {
     if (!training.daily && payload.date !== training.date) {
       return Promise.reject(Object.assign(new Error('이 연수는 등록된 날짜의 현황만 볼 수 있습니다.'), { code: 'INVALID_DATE' }));
     }
-    const people = sortByRegistration(state.demoAdminData.staff.filter(person => person.active !== false)).map((person, index) => ({
+    const people = staffForTraining(state.demoAdminData.staff, training).map((person, index) => ({
       staffId: person.id,
       department: person.department,
       name: person.name,
@@ -339,9 +345,12 @@ function selectTraining(trainingId) {
 }
 
 function renderDepartments() {
-  const groups = groupStaffByDepartment(state.publicData?.staff || []);
+  const eligibleStaff = staffForTraining(state.publicData?.staff || [], state.selectedTraining || {});
+  const groups = groupStaffByDepartment(eligibleStaff);
   const select = $('departmentSelect');
-  select.innerHTML = '<option value="">부서를 선택하세요</option>';
+  select.innerHTML = groups.size
+    ? '<option value="">부서를 선택하세요</option>'
+    : '<option value="">이 연수의 서명 대상 구성원이 없습니다</option>';
   for (const department of groups.keys()) {
     const option = document.createElement('option');
     option.value = department;
@@ -355,7 +364,8 @@ function renderDepartments() {
 
 function renderStaffForDepartment() {
   const department = $('departmentSelect').value;
-  const people = (state.publicData?.staff || []).filter(person => person.department === department && person.active !== false);
+  const people = staffForTraining(state.publicData?.staff || [], state.selectedTraining || {})
+    .filter(person => person.department === department);
   const select = $('staffSelect');
   select.innerHTML = '<option value="">성명을 선택하세요</option>';
   people.forEach(person => {
@@ -370,7 +380,11 @@ function renderStaffForDepartment() {
 }
 
 function goToSignature() {
-  const person = state.publicData.staff.find(item => item.id === $('staffSelect').value);
+  const person = state.publicData.staff.find(item =>
+    item.id === $('staffSelect').value &&
+    item.active !== false &&
+    isStaffIncludedInTraining(state.selectedTraining || {}, item)
+  );
   if (!person) return;
   state.selectedStaff = person;
   $('signerSummary').textContent = `${state.selectedTraining.title} · ${person.department} ${person.name}`;
@@ -545,7 +559,7 @@ async function copyText(value, message = '복사했습니다.') {
 
 function emptyAdminData() {
   return {
-    settings: {}, trainings: [], staff: [], exports: [], shareToken: '', shareUrl: '', loadedSections: []
+    settings: {}, trainings: [], staff: [], departments: [], exports: [], shareToken: '', shareUrl: '', loadedSections: []
   };
 }
 
@@ -568,7 +582,7 @@ function markAdminSectionLoaded(section, timestamp = Date.now()) {
 
 function mergeAdminSection(data) {
   if (!state.adminData || !data) return;
-  ['settings', 'trainings', 'staff', 'exports', 'shareToken', 'shareUrl'].forEach(key => {
+  ['settings', 'trainings', 'staff', 'departments', 'exports', 'shareToken', 'shareUrl'].forEach(key => {
     if (Object.hasOwn(data, key)) state.adminData[key] = data[key];
   });
   markAdminSectionLoaded(data.section);
@@ -578,6 +592,7 @@ function renderAdminSection(section) {
   if (section === 'trainings' || section === 'training_workspace') {
     renderTrainingAdmin();
     populateTrainingSelects();
+    refreshOpenTrainingAudienceChoices();
   }
   if (section === 'staff') renderStaffAdmin();
   if (section === 'settings') {
@@ -744,7 +759,11 @@ function switchAdminTab(tab, { sync = true } = {}) {
 
 function trainingMeta(training) {
   if (training.pending) return '서버에 저장하는 중…';
-  return [trainingTimeLabel(training), training.active ? '활성' : '비활성'].join(' · ');
+  const departments = normalizeAudienceDepartments(training.audienceDepartments);
+  const audience = trainingAudienceMode(training) === 'departments'
+    ? `대상 ${departments.length}개 부서`
+    : '대상 전체 구성원';
+  return [trainingTimeLabel(training), audience, training.active ? '활성' : '비활성'].join(' · ');
 }
 
 function upsertAdminItem(list, item, key = 'id') {
@@ -823,8 +842,8 @@ function renderTrainingAdmin() {
 function renderTrainingExportPanel(training, { preserveForm = false } = {}) {
   $('trainingExportTitle').textContent = training.title;
   $('trainingExportDateHint').textContent = training.daily
-    ? '매일 연수는 출력할 날짜를 선택할 수 있습니다.'
-    : `${formatKoreanDate(training.date)} 서명 기록을 출력합니다.`;
+    ? '매일 연수는 출력할 날짜를 선택할 수 있습니다. 현재 서명 대상 명단을 기준으로 만듭니다.'
+    : `${formatKoreanDate(training.date)}의 현재 서명 대상 명단을 기준으로 만듭니다.`;
   if (!preserveForm) restoreExportSettings(training);
   if (!training.daily) {
     $('exportDate').value = training.date;
@@ -880,7 +899,7 @@ function renderUnsignedStatusContent(data = null) {
   const rate = Number(summary.rate || 0);
   $('unsignedRate').textContent = `${Number.isFinite(rate) ? rate.toLocaleString('ko-KR', { maximumFractionDigits: 1 }) : 0}%`;
   const outsideCount = Number(summary.outsideRosterSignedCount || 0);
-  $('unsignedOutsideRoster').textContent = outsideCount ? `현재 명단 외 서명 ${outsideCount}건` : '';
+  $('unsignedOutsideRoster').textContent = outsideCount ? `현재 서명 대상 외 기록 ${outsideCount}건` : '';
   setHidden($('unsignedOutsideRoster'), !outsideCount);
 
   document.querySelectorAll('[data-unsigned-view]').forEach(button => {
@@ -895,7 +914,7 @@ function renderUnsignedStatusContent(data = null) {
     : people;
   const container = $('unsignedStatusList');
   if (!people.length) {
-    container.innerHTML = '<div class="empty-state">현재 등록된 구성원이 없습니다.</div>';
+    container.innerHTML = '<div class="empty-state">이 연수의 서명 대상 구성원이 없습니다.</div>';
     return;
   }
   if (!visiblePeople.length) {
@@ -1017,6 +1036,51 @@ function toggleTrainingUnsigned(training) {
   $('trainingUnsignedPanel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
+function availableTrainingDepartments(selected = []) {
+  const registered = normalizeAudienceDepartments([
+    ...(state.adminData?.departments || []),
+    ...activeDepartments(state.adminData?.staff || [])
+  ]);
+  const selectedDepartments = normalizeAudienceDepartments(selected);
+  return {
+    registered,
+    all: normalizeAudienceDepartments([...registered, ...selectedDepartments])
+  };
+}
+
+function selectedTrainingAudienceDepartments() {
+  return [...document.querySelectorAll('#trainingDepartmentChoices input[type="checkbox"]:checked')]
+    .map(input => input.value);
+}
+
+function updateTrainingAudienceVisibility() {
+  const mode = document.querySelector('input[name="trainingAudienceMode"]:checked')?.value || 'all';
+  setHidden($('trainingDepartmentChoicesWrap'), mode !== 'departments');
+}
+
+function renderTrainingAudienceChoices(selected = []) {
+  const normalizedSelected = normalizeAudienceDepartments(selected);
+  const selectedSet = new Set(normalizedSelected);
+  const { registered, all } = availableTrainingDepartments(normalizedSelected);
+  const registeredSet = new Set(registered);
+  const container = $('trainingDepartmentChoices');
+  const emptyMessage = state.adminLoadedAt.training_workspace
+    ? '등록된 활성 부서가 없습니다. 구성원을 먼저 등록해 주세요.'
+    : '부서 목록을 불러오는 중입니다…';
+  container.innerHTML = all.length ? all.map(department => `
+    <label class="training-department-choice">
+      <input type="checkbox" value="${escapeHtml(department)}" ${selectedSet.has(department) ? 'checked' : ''}>
+      <span>${escapeHtml(department)}</span>
+      ${registeredSet.has(department) ? '' : '<small>현재 구성원 없음</small>'}
+    </label>`).join('') : `<p class="training-department-empty">${emptyMessage}</p>`;
+  updateTrainingAudienceVisibility();
+}
+
+function refreshOpenTrainingAudienceChoices() {
+  if ($('trainingForm').classList.contains('hidden')) return;
+  renderTrainingAudienceChoices(selectedTrainingAudienceDepartments());
+}
+
 function openTrainingForm(training = null) {
   $('trainingId').value = training?.id || '';
   $('trainingTitle').value = training?.title || '';
@@ -1025,6 +1089,10 @@ function openTrainingForm(training = null) {
   $('trainingStart').value = training?.startTime || '';
   $('trainingEnd').value = training?.endTime || '';
   $('trainingActive').checked = training ? training.active !== false : true;
+  const audienceMode = trainingAudienceMode(training || {});
+  $('trainingAudienceAll').checked = audienceMode === 'all';
+  $('trainingAudienceDepartments').checked = audienceMode === 'departments';
+  renderTrainingAudienceChoices(training?.audienceDepartments || []);
   setHidden($('trainingFormError'), true);
   setHidden($('trainingForm'), false);
   $('trainingTitle').focus();
@@ -1039,7 +1107,9 @@ async function saveTraining(event) {
     daily: $('trainingDaily').checked,
     startTime: $('trainingStart').value,
     endTime: $('trainingEnd').value,
-    active: $('trainingActive').checked
+    active: $('trainingActive').checked,
+    audienceMode: document.querySelector('input[name="trainingAudienceMode"]:checked')?.value || 'all',
+    audienceDepartments: selectedTrainingAudienceDepartments()
   };
   const errors = validateTraining(training);
   if (training.active && !isPrivacyReady(state.adminData.settings)) errors.push('기관 설정에서 개인정보 안내를 모두 입력해야 활성화할 수 있습니다.');
@@ -1134,6 +1204,11 @@ function renderStaffAdmin() {
     ${groups.get(department).map(person => `<div class="admin-row" data-staff-id="${escapeHtml(person.id)}"><div class="admin-row-main"><strong>${escapeHtml(person.name)}</strong></div><div class="row-actions"><button data-action="edit-staff">수정</button><button data-action="delete-staff" class="danger">삭제</button></div></div>`).join('')}</div>`).join('') : '<div class="empty-state">등록된 구성원이 없습니다.</div>';
 }
 
+function syncAdminDepartmentsFromStaff() {
+  if (!state.adminData) return;
+  state.adminData.departments = activeDepartments(state.adminData.staff || []);
+}
+
 function normalizeStaffNamesField() {
   const input = $('staffNames');
   const value = input.value;
@@ -1156,6 +1231,7 @@ async function addStaff(event) {
     const result = await rpc('save_staff_batch', { people: names.map(name => ({ department, name })) });
     $('staffNames').value = '';
     state.adminData.staff = sortByRegistration([...(state.adminData.staff || []), ...(result.people || [])]);
+    syncAdminDepartmentsFromStaff();
     markAdminSectionLoaded('staff');
     renderStaffAdmin();
     showToast(`${result.added}명 등록, ${result.skipped}명 건너뜀`);
@@ -1192,6 +1268,7 @@ async function handleStaffListClick(event) {
       const result = await rpc('delete_staff', { staffId: person.id });
       state.adminData.staff = state.adminData.staff.filter(item => item.id !== (result.deletedId || person.id));
     }
+    syncAdminDepartmentsFromStaff();
     markAdminSectionLoaded('staff');
     renderStaffAdmin();
   } catch (error) { showToast(error.message, 4200); }
@@ -1206,6 +1283,10 @@ async function renameDepartment(event) {
     const result = await rpc('rename_department', { oldDepartment, newDepartment });
     $('newDepartment').value = '';
     state.adminData.staff = state.adminData.staff.map(person => person.department === oldDepartment ? { ...person, department: newDepartment } : person);
+    syncAdminDepartmentsFromStaff();
+    (result.trainings || []).forEach(training => {
+      state.adminData.trainings = upsertAdminItem(state.adminData.trainings, training);
+    });
     markAdminSectionLoaded('staff');
     renderStaffAdmin();
     showToast(`${result.updated}명의 부서명을 변경했습니다.`);
@@ -1240,6 +1321,7 @@ async function importRosterFile(event) {
     if (!confirmed) return;
     const result = await rpc('save_staff_batch', { people });
     state.adminData.staff = sortByRegistration([...(state.adminData.staff || []), ...(result.people || [])]);
+    syncAdminDepartmentsFromStaff();
     markAdminSectionLoaded('staff');
     renderStaffAdmin();
     status.textContent = `${result.added}명 등록, ${result.skipped}명 건너뜀`;
@@ -1944,6 +2026,9 @@ function bindEvents() {
   $('newTraining').addEventListener('click', () => openTrainingForm());
   $('cancelTraining').addEventListener('click', () => setHidden($('trainingForm'), true));
   $('trainingForm').addEventListener('submit', saveTraining);
+  document.querySelectorAll('input[name="trainingAudienceMode"]').forEach(input => {
+    input.addEventListener('change', updateTrainingAudienceVisibility);
+  });
   $('trainingAdminList').addEventListener('click', handleTrainingListClick);
   $('collapseTrainingExport').addEventListener('click', collapseTrainingExport);
   $('collapseTrainingUnsigned').addEventListener('click', collapseTrainingUnsigned);

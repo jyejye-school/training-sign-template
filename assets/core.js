@@ -55,6 +55,53 @@ export function groupStaffByDepartment(staff = []) {
   return groups;
 }
 
+export function normalizeAudienceDepartments(value = []) {
+  let source = value;
+  if (!Array.isArray(source)) {
+    try {
+      source = JSON.parse(String(source || '[]'));
+    } catch {
+      source = [];
+    }
+  }
+  if (!Array.isArray(source)) return [];
+  const seen = new Set();
+  const departments = [];
+  source.forEach(item => {
+    const department = String(item || '').trim();
+    const key = department.toLocaleLowerCase('ko');
+    if (!department || department.length > 50 || seen.has(key)) return;
+    seen.add(key);
+    departments.push(department);
+  });
+  return departments.slice(0, 200);
+}
+
+export function trainingAudienceMode(training = {}) {
+  const mode = String(training.audienceMode || '').trim();
+  if (!mode || mode === 'all') return 'all';
+  return 'departments';
+}
+
+export function isStaffIncludedInTraining(training = {}, person = {}) {
+  const storedMode = String(training.audienceMode || '').trim();
+  if (!storedMode || storedMode === 'all') return true;
+  if (storedMode !== 'departments') return false;
+  const departments = normalizeAudienceDepartments(training.audienceDepartments);
+  const department = String(person.department || '').trim().toLowerCase();
+  return departments.some(item => item.toLowerCase() === department);
+}
+
+export function staffForTraining(staff = [], training = {}) {
+  return [...staff]
+    .filter(person => person && person.active !== false && isStaffIncludedInTraining(training, person))
+    .sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+}
+
+export function activeDepartments(staff = []) {
+  return [...groupStaffByDepartment(staff).keys()];
+}
+
 export function normalizeRosterRows(rows = []) {
   if (!Array.isArray(rows) || rows.length === 0) return [];
   const normalized = [];
@@ -112,6 +159,11 @@ export function validateTraining(training = {}) {
   if (!String(training.title || '').trim()) errors.push('연수명을 입력해 주세요.');
   if (!training.daily && !/^\d{4}-\d{2}-\d{2}$/.test(String(training.date || ''))) errors.push('연수 날짜를 입력해 주세요.');
   if (training.startTime && training.endTime && training.startTime >= training.endTime) errors.push('종료 시각은 시작 시각보다 늦어야 합니다.');
+  const audienceMode = String(training.audienceMode || '').trim();
+  if (audienceMode && audienceMode !== 'all' && audienceMode !== 'departments') errors.push('서명 대상 방식을 다시 선택해 주세요.');
+  if (audienceMode === 'departments' && !normalizeAudienceDepartments(training.audienceDepartments).length) {
+    errors.push('서명 대상 부서를 하나 이상 선택해 주세요.');
+  }
   return errors;
 }
 

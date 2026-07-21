@@ -8,11 +8,11 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'">
   <title>학교 연수 전자서명</title>
   <link id="faviconLink" rel="icon" type="image/svg+xml" href="favicon.svg?v=20260720.5">
-  <link rel="stylesheet" href="assets/styles.css?v=20260720.2">
+  <link rel="stylesheet" href="assets/styles.css?v=20260721.1">
   <script src="assets/config.js"></script>
   <script src="vendor/qrcode.js" defer></script>
   <script src="vendor/xlsx.full.min.js" defer></script>
-  <script type="module" src="assets/app.js?v=20260720.8"></script>
+  <script type="module" src="assets/app.js?v=20260721.1"></script>
 </head>
 <body data-panel="loadingPanel">
   <a class="skip-link" href="#mainContent">본문으로 바로가기</a>
@@ -252,6 +252,17 @@
             <label>종료 시각<input id="trainingEnd" type="time"></label>
             <label class="inline-check"><input id="trainingActive" type="checkbox" checked> 활성화</label>
           </div>
+          <fieldset class="training-audience-fieldset">
+            <legend>서명 대상</legend>
+            <div class="training-audience-modes">
+              <label><input id="trainingAudienceAll" type="radio" name="trainingAudienceMode" value="all" checked><span><strong>전체 구성원</strong><small>등록된 모든 활성 구성원이 대상입니다.</small></span></label>
+              <label><input id="trainingAudienceDepartments" type="radio" name="trainingAudienceMode" value="departments"><span><strong>부서 선택</strong><small>선택한 부서의 활성 구성원만 대상입니다.</small></span></label>
+            </div>
+            <div id="trainingDepartmentChoicesWrap" class="training-department-choices-wrap hidden">
+              <div id="trainingDepartmentChoices" class="training-department-choices"></div>
+              <p class="form-hint">선택한 부서에 나중에 추가되는 구성원도 자동으로 대상에 포함됩니다.</p>
+            </div>
+          </fieldset>
           <p id="trainingFormError" class="form-error hidden"></p>
           <div class="button-row"><button class="button primary" type="submit">저장</button><button id="cancelTraining" class="button secondary" type="button">취소</button></div>
         </form>
