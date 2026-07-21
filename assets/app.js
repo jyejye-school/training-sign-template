@@ -21,13 +21,15 @@ import {
 } from './core.js?v=20260721.1';
 
 const $ = id => document.getElementById(id);
-const config = window.TRAINING_SIGN_CONFIG || {};
-const DEMO = new URLSearchParams(location.search).get('demo') === '1';
-const API_URL = String(config.API_URL || '');
+let DEMO = new URLSearchParams(location.search).get('demo') === '1';
+const API_URL = trustedWebAppUrl(
+  window.TRAINING_SIGN_WEB_APP_URL || window.TRAINING_SIGN_CONFIG?.API_URL
+);
 let shareToken = DEMO ? 'DEMO_TOKEN_1234567890123456' : parseShareToken(location.hash);
-const baseUrl = `${location.origin}${location.pathname}`;
+const staticBaseUrl = `${location.origin}${location.pathname}`;
 const EXPORT_SETTINGS_KEY = 'training-sign:export-settings';
 const ADMIN_SYNC_MS = 30000;
+const SHEETJS_VERSION = '0.20.3';
 const DEFAULT_FAVICON_URL = 'favicon.svg?v=20260720.5';
 const FAVICON_MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const FAVICON_MAX_PNG_BYTES = 32 * 1024;
@@ -74,6 +76,102 @@ const state = {
   unsignedRefreshTimer: null,
   pendingPreviewToken: ''
 };
+
+let xlsxLibraryPromise = null;
+
+function xlsxLibraryUrl() {
+  if (hasAppsScriptLocationBridge()) {
+    const url = new URL(API_URL);
+    url.searchParams.set('asset', 'sheetjs');
+    url.searchParams.set('v', SHEETJS_VERSION);
+    return url.href;
+  }
+  return `vendor/xlsx.full.min.js?v=${SHEETJS_VERSION}`;
+}
+
+function loadXlsxLibrary() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  if (xlsxLibraryPromise) return xlsxLibraryPromise;
+
+  xlsxLibraryPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = xlsxLibraryUrl();
+    script.async = true;
+    script.dataset.trainingSignLibrary = 'sheetjs';
+    script.onload = () => {
+      if (window.XLSX) {
+        resolve(window.XLSX);
+        return;
+      }
+      script.remove();
+      xlsxLibraryPromise = null;
+      reject(new Error('엑셀 기능을 불러오지 못했습니다.'));
+    };
+    script.onerror = () => {
+      script.remove();
+      xlsxLibraryPromise = null;
+      reject(new Error('엑셀 기능을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.'));
+    };
+    document.head.append(script);
+  });
+
+  return xlsxLibraryPromise;
+}
+
+function trustedWebAppUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    const trusted = url.origin === 'https://script.google.com' &&
+      /^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url.pathname) &&
+      !url.search && !url.hash;
+    return trusted ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
+function hasAppsScriptLocationBridge() {
+  return Boolean(API_URL && window.google?.script?.url?.getLocation);
+}
+
+function appShareBaseUrl() {
+  return !DEMO && API_URL ? API_URL : staticBaseUrl;
+}
+
+function initializeAppLocation() {
+  if (!hasAppsScriptLocationBridge()) {
+    shareToken = DEMO ? 'DEMO_TOKEN_1234567890123456' : parseShareToken(location.hash);
+    return Promise.resolve();
+  }
+  return new Promise(resolve => {
+    const finish = info => {
+      const outerDemo = String(info?.parameter?.demo || '') === '1';
+      DEMO = DEMO || outerDemo;
+      shareToken = DEMO ? 'DEMO_TOKEN_1234567890123456' : parseShareToken(info?.hash || '');
+      resolve();
+    };
+    try {
+      window.google.script.url.getLocation(finish);
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+function replaceAppHash(token) {
+  const hash = token ? `k=${encodeURIComponent(token)}` : '';
+  if (!DEMO && API_URL && window.google?.script?.history?.replace) {
+    try {
+      window.google.script.history.replace({}, {}, hash);
+      return;
+    } catch {
+      // 정적 페이지 방식으로 안전하게 되돌립니다.
+    }
+  }
+  history.replaceState(null, '', token ? buildShareUrl(staticBaseUrl, token) : staticBaseUrl);
+}
 
 const demoData = {
   settings: {
@@ -183,8 +281,8 @@ async function requestConfirmation(options) {
 
 async function rpc(action, payload = {}, options = {}) {
   if (DEMO) return demoRpc(action, payload);
-  if (!API_URL || API_URL.includes('__APPS_SCRIPT_WEB_APP_URL__')) {
-    throw new Error('아직 Apps Script 주소가 연결되지 않았습니다. 관리자에게 알려 주세요.');
+  if (!API_URL) {
+    throw new Error('웹앱 실행 주소를 확인하지 못했습니다. Apps Script의 /exec 주소로 다시 접속해 주세요.');
   }
   const body = { action, ...payload };
   if (options.admin !== false && state.adminSession && !body.sessionToken) body.sessionToken = state.adminSession;
@@ -216,7 +314,7 @@ function demoRpc(action, payload) {
       departments: activeDepartments(demoData.staff),
       exports: [],
       shareToken: shareToken,
-      shareUrl: buildShareUrl(baseUrl, shareToken),
+      shareUrl: buildShareUrl(appShareBaseUrl(), shareToken),
       stats: { staff: demoData.staff.length, trainings: demoData.trainings.length, signatures: 2 }
     };
   }
@@ -352,7 +450,7 @@ function demoRpc(action, payload) {
 function applySettings(settings) {
   const color = /^#[0-9a-f]{6}$/i.test(settings.brandColor || '') ? settings.brandColor : '#315c54';
   document.documentElement.style.setProperty('--brand', color);
-  $('schoolName').textContent = settings.schoolName || config.APP_NAME || '학교 연수 전자서명';
+  $('schoolName').textContent = settings.schoolName || '학교 연수 전자서명';
   $('schoolSubtitle').textContent = settings.subtitle || '연수 참여 확인';
   $('schoolDate').textContent = formatKoreanHeaderDate(state.publicData?.serverDate || todaySeoul());
   document.title = `${settings.schoolName || '학교'} 연수 전자서명`;
@@ -674,7 +772,7 @@ function renderQr(container, url) {
 }
 
 function openShareDialog() {
-  const url = DEMO ? buildShareUrl(baseUrl, shareToken) : location.href;
+  const url = buildShareUrl(appShareBaseUrl(), shareToken);
   $('shareUrl').value = url;
   renderQr($('qrCode'), url);
   $('shareDialog').showModal();
@@ -859,7 +957,6 @@ async function handleAdminLogin(event) {
       data = await rpc('complete_setup', {
         setupCode: $('setupCode').value.trim(),
         password,
-        frontendUrl: baseUrl,
         view: 'bootstrap'
       }, { admin: false });
     } else {
@@ -1749,12 +1846,16 @@ async function renameDepartment(event) {
   } catch (error) { showToast(error.message, 4200); }
 }
 
-function downloadRosterTemplate() {
-  if (!window.XLSX) return showToast('엑셀 기능을 불러오지 못했습니다.');
-  const sheet = XLSX.utils.aoa_to_sheet([['부서', '성명'], ['교무기획부', '홍길동']]);
-  const book = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(book, sheet, '구성원명단');
-  XLSX.writeFile(book, '구성원_등록_양식.xlsx');
+async function downloadRosterTemplate() {
+  try {
+    const xlsx = await loadXlsxLibrary();
+    const sheet = xlsx.utils.aoa_to_sheet([['부서', '성명'], ['교무기획부', '홍길동']]);
+    const book = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(book, sheet, '구성원명단');
+    xlsx.writeFile(book, '구성원_등록_양식.xlsx');
+  } catch (error) {
+    showToast(error.message, 4200);
+  }
 }
 
 async function importRosterFile(event) {
@@ -1762,11 +1863,12 @@ async function importRosterFile(event) {
   if (!file) return;
   const status = $('rosterImportStatus');
   try {
-    if (!window.XLSX) throw new Error('엑셀 기능을 불러오지 못했습니다.');
+    status.textContent = '엑셀 기능을 준비하는 중…';
+    const xlsx = await loadXlsxLibrary();
     status.textContent = '파일을 읽는 중…';
-    const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    const workbook = xlsx.read(await file.arrayBuffer(), { type: 'array' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+    const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '' });
     const people = normalizeRosterRows(rows);
     if (!people.length) throw new Error('부서와 성명 열을 찾지 못했습니다. 양식을 확인해 주세요.');
     const confirmed = await requestConfirmation({
@@ -1880,7 +1982,7 @@ async function saveSettings(event) {
   };
   if (!isPrivacyReady(settings)) return showToast('개인정보 안내 항목을 모두 입력해 주세요.');
   try {
-    const result = await rpc('save_settings', { settings, frontendUrl: baseUrl });
+    const result = await rpc('save_settings', { settings });
     state.adminData.settings = result.settings || settings;
     markAdminSectionLoaded('settings');
     fillSettingsForm();
@@ -1952,7 +2054,7 @@ async function handleRecordClick(event) {
 }
 
 function renderShareAdmin() {
-  const url = state.adminData?.shareUrl || buildShareUrl(baseUrl, state.adminData?.shareToken || '');
+  const url = state.adminData?.shareUrl || buildShareUrl(appShareBaseUrl(), state.adminData?.shareToken || '');
   $('adminShareUrl').value = url;
   renderQr($('adminQrCode'), url);
 }
@@ -1966,7 +2068,7 @@ async function rotateShareToken() {
   });
   if (!confirmed) return;
   try {
-    const data = await rpc('rotate_share_token', { frontendUrl: baseUrl });
+    const data = await rpc('rotate_share_token');
     state.adminData.shareToken = data.shareToken;
     state.adminData.shareUrl = data.shareUrl;
     renderShareAdmin();
@@ -2428,7 +2530,7 @@ function closeAdminAndLogout() {
   logoutRequest.catch(() => { /* 이미 만료된 서버 세션은 별도 안내가 필요하지 않습니다. */ });
   if (currentShareToken) {
     shareToken = currentShareToken;
-    history.replaceState(null, '', buildShareUrl(baseUrl, shareToken));
+    replaceAppHash(shareToken);
     initializePublicApp();
   }
 }
@@ -2562,4 +2664,4 @@ function bindEvents() {
 }
 
 bindEvents();
-initializePublicApp();
+initializeAppLocation().then(initializePublicApp);

@@ -5,7 +5,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '1.8.0',
+  VERSION: '1.9.1',
   TIME_ZONE: 'Asia/Seoul',
   DATA_FILE: '학교 연수 전자서명 데이터',
   GUIDE_SHEET: '사용설명서',
@@ -42,13 +42,13 @@ const SETTING_KEYS = Object.freeze([
 const INSTANCE_PROPERTIES = Object.freeze([
   'SPREADSHEET_ID', 'INSTANCE_ID', 'ROOT_FOLDER_ID', 'SIGNATURE_FOLDER_ID', 'EXPORT_FOLDER_ID',
   'SHARE_TOKEN', 'SETUP_CODE', 'ADMIN_PEPPER', 'ADMIN_EPOCH', 'ADMIN_SALT', 'ADMIN_HASH', 'FRONTEND_URL',
-  'ONSITE_CODE_SECRET'
+  'ONSITE_CODE_SECRET', 'FAVICON_REV'
 ]);
 
 let REQUEST_CONTEXT_ = null;
 
 function resetRequestContext_() {
-  REQUEST_CONTEXT_ = { spreadsheet: null, sheets: {}, rows: {} };
+  REQUEST_CONTEXT_ = { spreadsheet: null, sheets: {}, rows: {}, webAppUrl: '' };
 }
 
 function requestContext_() {
@@ -131,9 +131,60 @@ function rebuildGuideSheetFromMenu() {
   SpreadsheetApp.getUi().alert('사용설명서', '사용설명서 탭을 다시 만들었습니다. 기존 데이터 탭은 변경하지 않았습니다.', SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
-function doGet() {
+function doGet(event) {
   resetRequestContext_();
-  return jsonOutput_({ ok: true, data: { service: '학교 연수 전자서명 API', version: APP.VERSION } });
+  const pathInfo = String(event && event.pathInfo || '').replace(/^\/+|\/+$/g, '');
+  if (pathInfo === 'favicon.svg') return faviconOutput_();
+  if (event && event.parameter && String(event.parameter.asset || '').toLowerCase() === 'sheetjs') {
+    return ContentService
+      .createTextOutput(HtmlService.createHtmlOutputFromFile('SheetJS').getContent())
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  if (event && event.parameter && String(event.parameter.format || '').toLowerCase() === 'json') {
+    return jsonOutput_({ ok: true, data: { service: '학교 연수 전자서명 API', version: APP.VERSION } });
+  }
+  const webAppUrl = currentWebAppUrl_();
+  const template = HtmlService.createTemplateFromFile('WebApp');
+  template.WEB_APP_URL = webAppUrl;
+  const faviconRevision = PropertiesService.getScriptProperties().getProperty('FAVICON_REV') || APP.VERSION;
+  return template.evaluate()
+    .setTitle('학교 연수 전자서명')
+    .setFaviconUrl(webAppUrl + '/favicon.svg?v=' + encodeURIComponent(faviconRevision))
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
+}
+
+/** HtmlService 바깥 브라우저 탭에서도 기관 파비콘을 표시합니다. */
+function faviconOutput_() {
+  return ContentService.createTextOutput(faviconSvg_())
+    .setMimeType(ContentService.MimeType.XML);
+}
+
+function faviconSvg_() {
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    if (properties.getProperty('SPREADSHEET_ID')) {
+      const faviconData = validateFaviconData_(readSettings_().faviconData);
+      if (faviconData) {
+        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+          '<image width="64" height="64" href="' + faviconData + '"/>' +
+          '</svg>';
+      }
+    }
+  } catch (error) {
+    console.warn('사용자 지정 파비콘을 읽지 못해 기본 아이콘을 사용합니다: ' + String(error && error.message || error));
+  }
+  return defaultFaviconSvg_();
+}
+
+function defaultFaviconSvg_() {
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+    '<rect width="64" height="64" rx="14" fill="#2563eb"/>' +
+    '<rect x="6" y="8" width="43" height="14" rx="7" fill="#fff"/>' +
+    '<path d="M47 8 60 15 47 22Z" fill="#bfdbfe"/>' +
+    '<path d="m57 13.4 3 1.6-3 1.6Z" fill="#172554"/>' +
+    '<path d="M43 9v12" fill="none" stroke="#2563eb" stroke-width="3" stroke-linecap="round"/>' +
+    '<text x="32" y="56" fill="#fff" font-size="27" font-weight="900" letter-spacing="-1.5" text-anchor="middle" font-family="Malgun Gothic,Apple SD Gothic Neo,sans-serif">서명</text>' +
+    '</svg>';
 }
 
 function doPost(event) {
@@ -173,7 +224,7 @@ function dispatch_(request) {
   if (action === 'get_training_reception_status') return getTrainingReception_(request.trainingId);
   if (action === 'start_training_reception') return withAdminMutationLock_(function() { return startTrainingReception_(request.trainingId, request.durationMinutes); });
   if (action === 'close_training_reception') return withAdminMutationLock_(function() { return closeTrainingReception_(request.trainingId); });
-  if (action === 'save_settings') return withAdminMutationLock_(function() { return saveSettings_(request.settings, request.frontendUrl); });
+  if (action === 'save_settings') return withAdminMutationLock_(function() { return saveSettings_(request.settings); });
   if (action === 'save_training') return withAdminMutationLock_(function() { return saveTraining_(request.training); });
   if (action === 'delete_training') return withAdminMutationLock_(function() { return deleteTraining_(request.trainingId); });
   if (action === 'move_training') return withAdminMutationLock_(function() { return moveTraining_(request.trainingId, request.direction); });
@@ -183,7 +234,7 @@ function dispatch_(request) {
   if (action === 'rename_department') return withAdminMutationLock_(function() { return renameDepartment_(request.oldDepartment, request.newDepartment); });
   if (action === 'list_records') return listRecords_(request.trainingId, request.date);
   if (action === 'delete_record') return withAdminMutationLock_(function() { return deleteRecord_(request.recordId); });
-  if (action === 'rotate_share_token') return withAdminMutationLock_(function() { return rotateShareToken_(request.frontendUrl); });
+  if (action === 'rotate_share_token') return withAdminMutationLock_(function() { return rotateShareToken_(); });
   if (action === 'change_password') return withAdminMutationLock_(function() { return changePassword_(request.currentPassword, request.newPassword); });
   if (action === 'start_export') return startExport_(request);
   if (action === 'continue_export') return continueExport_(request.jobId);
@@ -272,9 +323,9 @@ function completeSetup_(request) {
   const salt = randomToken_(18);
   properties.setProperties({
     ADMIN_SALT: salt,
-    ADMIN_HASH: passwordHash_(password, salt),
-    FRONTEND_URL: normalizeFrontendUrl_(request.frontendUrl)
+    ADMIN_HASH: passwordHash_(password, salt)
   });
+  properties.deleteProperty('FRONTEND_URL');
   properties.deleteProperty('SETUP_CODE');
   audit_('complete_setup', 'admin', 1, '관리자 비밀번호 최초 설정');
   return createAdminLoginResult_(request.view);
@@ -796,7 +847,6 @@ function getAdminData_() {
   requireInitialized_();
   const properties = PropertiesService.getScriptProperties();
   const shareToken = properties.getProperty('SHARE_TOKEN') || '';
-  const frontendUrl = properties.getProperty('FRONTEND_URL') || '';
   const staff = readRows_(SHEETS.STAFF).sort(staffSort_).map(publicStaff_);
   const trainings = readRows_(SHEETS.TRAININGS).sort(orderSort_).map(publicTraining_);
   const signatures = readRows_(SHEETS.SIGNATURES);
@@ -805,7 +855,7 @@ function getAdminData_() {
     .map(publicJob_);
   return {
     settings: readSettings_(), staff: staff, departments: listActiveDepartments_(), trainings: trainings, exports: exports,
-    shareToken: shareToken, shareUrl: buildShareUrl_(frontendUrl, shareToken),
+    shareToken: shareToken, shareUrl: buildShareUrl_(currentWebAppUrl_(), shareToken),
     stats: { staff: staff.length, trainings: trainings.length, signatures: signatures.length }
   };
 }
@@ -814,14 +864,13 @@ function getAdminBootstrap_() {
   requireInitialized_();
   const properties = PropertiesService.getScriptProperties();
   const shareToken = properties.getProperty('SHARE_TOKEN') || '';
-  const frontendUrl = properties.getProperty('FRONTEND_URL') || '';
   return {
     settings: readSettings_(),
     trainings: readRows_(SHEETS.TRAININGS).sort(orderSort_).map(publicTraining_),
     staff: [],
     exports: [],
     shareToken: shareToken,
-    shareUrl: buildShareUrl_(frontendUrl, shareToken),
+    shareUrl: buildShareUrl_(currentWebAppUrl_(), shareToken),
     loadedSections: ['settings', 'trainings', 'share']
   };
 }
@@ -858,11 +907,10 @@ function getAdminSection_(section) {
   }
   const properties = PropertiesService.getScriptProperties();
   const shareToken = properties.getProperty('SHARE_TOKEN') || '';
-  const frontendUrl = properties.getProperty('FRONTEND_URL') || '';
-  return { section: name, shareToken: shareToken, shareUrl: buildShareUrl_(frontendUrl, shareToken) };
+  return { section: name, shareToken: shareToken, shareUrl: buildShareUrl_(currentWebAppUrl_(), shareToken) };
 }
 
-function saveSettings_(input, frontendUrl) {
+function saveSettings_(input) {
   const current = readSettings_();
   const settings = {};
   SETTING_KEYS.forEach(function(key) {
@@ -875,7 +923,9 @@ function saveSettings_(input, frontendUrl) {
   if (!privacyReady_(settings)) apiError_('PRIVACY_REQUIRED', '학교명과 개인정보 처리 안내를 모두 입력해 주세요.');
   if (!/^#[0-9a-f]{6}$/i.test(settings.brandColor)) settings.brandColor = '#315c54';
   writeSettings_(settings);
-  if (frontendUrl) PropertiesService.getScriptProperties().setProperty('FRONTEND_URL', normalizeFrontendUrl_(frontendUrl));
+  if (settings.faviconData !== String(current.faviconData || '')) {
+    PropertiesService.getScriptProperties().setProperty('FAVICON_REV', randomToken_(10));
+  }
   audit_('save_settings', 'settings', 1, '기관 설정 변경');
   return { settings: settings };
 }
@@ -1208,11 +1258,12 @@ function deleteRecord_(recordId) {
   return { deleted: true, deletedId: id };
 }
 
-function rotateShareToken_(frontendUrl) {
+function rotateShareToken_() {
   const properties = PropertiesService.getScriptProperties();
   const token = randomToken_(24);
-  const url = normalizeFrontendUrl_(frontendUrl || properties.getProperty('FRONTEND_URL') || '');
-  properties.setProperties({ SHARE_TOKEN: token, FRONTEND_URL: url });
+  const url = currentWebAppUrl_();
+  properties.setProperty('SHARE_TOKEN', token);
+  properties.deleteProperty('FRONTEND_URL');
   audit_('rotate_share_token', 'share', 1, '기존 공유 링크 무효화');
   return { shareToken: token, shareUrl: buildShareUrl_(url, token) };
 }
@@ -2077,7 +2128,7 @@ function ensureGuideSheet_(spreadsheet, rebuild) {
   sheet.getRange('B4:E4').merge()
     .setValue(isDistributionTemplate
       ? '중요  이 파일은 배포용 원본입니다. 원본에서 초기화하지 말고 반드시 파일 → 사본 만들기로 시작하세요.'
-      : '중요  현재 운영 시트에는 학교 데이터가 있으므로 다른 학교에 공유하지 마세요. 아래 GitHub 템플릿의 빈 배포본을 사용하세요.')
+      : '중요  현재 운영 시트에는 학교 데이터가 있으므로 다른 학교에 공유하지 마세요. 비어 있는 배포용 원본의 사본을 안내하세요.')
     .setBackground('#FFF4DF')
     .setFontColor('#A05A00')
     .setFontWeight('bold')
@@ -2091,21 +2142,11 @@ function ensureGuideSheet_(spreadsheet, rebuild) {
       steps: [
         ['1', '학교용 사본 만들기', '상단 메뉴에서 파일 → 사본 만들기를 누릅니다.', '반드시 새로 만든 사본에서 다음 단계를 진행합니다.'],
         ['2', '초기 설정과 권한 승인', '새 사본에서 🖊️ 전자서명 관리 → 초기 설정 실행을 누르고, 완료 창의 초기 설정 코드를 보관합니다.', '‘Google에서 확인하지 않은 앱’이 나오면 개발자 이메일이 본인 계정인지 확인한 뒤 고급 → 학교 연수 전자서명 시스템으로 이동 → 허용을 누릅니다. 모르는 이메일이거나 Google Workspace 정책이 차단하면 중단하고 관리자에게 문의하세요. 소유자만 처음 한 번 승인하며 서명 참여자에게는 이 화면이 나타나지 않습니다.', 134],
-        ['3', '웹앱 배포와 주소 복사', '확장 프로그램 → Apps Script에서 배포 → 새 배포 → 유형 선택 → 웹 앱을 고릅니다.', '실행 계정은 나, 액세스 권한은 모든 사용자로 설정해 배포한 뒤 /exec로 끝나는 웹 앱 URL을 복사합니다.', 76]
+        ['3', '웹앱 배포와 화면 확인', '확장 프로그램 → Apps Script에서 배포 → 새 배포 → 유형 선택 → 웹 앱을 고릅니다.', '실행 계정은 나, 액세스 권한은 모든 사용자(로그인 없이 접근 가능)로 설정합니다. 배포 뒤 /exec로 끝나는 주소를 열면 전자서명 화면과 관리자 버튼이 함께 보이며 별도 홈페이지를 만들 필요가 없습니다.', 120]
       ]
     },
     {
-      title: '2. 학교별 전자서명 화면 연결하기',
-      color: '#18794E',
-      pale: '#EAF7F0',
-      steps: [
-        ['1', '공개 저장소 만들기', 'https://github.com/school-training-sign/training-sign-template에서 Use this template → Create a new repository를 누릅니다.', '저장소 이름은 training-sign, 공개 범위는 Public으로 설정합니다.', 76],
-        ['2', '웹앱 주소 연결', '내 저장소의 assets/config.js를 열어 안내된 자리에 복사한 /exec 주소를 넣고 저장합니다.', '초기 설정 코드·비밀번호·공유 키·명단은 GitHub 저장소에 넣지 않습니다.', 76],
-        ['3', 'Pages와 관리자 확인', 'Settings → Pages에서 Deploy from a branch, main, /(root)를 선택합니다.', 'Pages 주소에서 관리자 버튼을 눌렀을 때 첫 설정 화면이 보이면 연결이 끝난 것입니다.', 76]
-      ]
-    },
-    {
-      title: '3. 관리자 첫 설정',
+      title: '2. 관리자 첫 설정',
       color: '#6F42C1',
       pale: '#F3EDFF',
       steps: [
@@ -2117,7 +2158,7 @@ function ensureGuideSheet_(spreadsheet, rebuild) {
       ]
     },
     {
-      title: '4. 연수 운영과 출력',
+      title: '3. 연수 운영과 출력',
       color: '#165DFF',
       pale: '#F4F8FF',
       steps: [
@@ -2130,7 +2171,7 @@ function ensureGuideSheet_(spreadsheet, rebuild) {
       ]
     },
     {
-      title: '5. 보안·복구',
+      title: '4. 보안·복구',
       color: '#B42318',
       pale: '#FFF0EE',
       steps: [
@@ -2566,9 +2607,14 @@ function safeEqual_(left, right) {
   return mismatch === 0;
 }
 
-function normalizeFrontendUrl_(url) {
-  const value = string_(url, 500).split('#')[0].replace(/\?.*$/, '');
-  if (!/^https:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[^\s]*)?$/.test(value)) apiError_('VALIDATION', 'GitHub Pages 주소가 올바르지 않습니다.');
+function currentWebAppUrl_() {
+  const context = requestContext_();
+  if (context.webAppUrl) return context.webAppUrl;
+  const value = String(ScriptApp.getService().getUrl() || '').trim();
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(value)) {
+    apiError_('WEB_APP_NOT_DEPLOYED', '현재 Apps Script 웹앱 실행 주소를 확인할 수 없습니다. /exec 주소로 배포한 뒤 다시 시도해 주세요.');
+  }
+  context.webAppUrl = value;
   return value;
 }
 
