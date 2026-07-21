@@ -1,17 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  activeDepartments,
   buildShareUrl,
   formatKoreanHeaderDate,
   groupStaffByDepartment,
   isPrivacyReady,
   isValidAdminPassword,
   localDuplicateKey,
+  normalizeAudienceDepartments,
   normalizeNameEntryText,
   normalizeRosterRows,
   parseShareToken,
   safeFileName,
   sortRecords,
+  staffForTraining,
   splitNames,
   validateTraining
 } from '../assets/core.js';
@@ -56,6 +59,31 @@ test('명단은 부서별로 묶고 등록 순서를 유지한다', () => {
   assert.deepEqual(groups.get('교무부').map(person => person.name), ['김교사', '최교사']);
 });
 
+test('연수별 대상 부서는 기존 연수는 전체로, 선택 연수는 지정 부서만 처리한다', () => {
+  const staff = [
+    { id: '1', department: '교무부', name: '김교사', active: true, sortOrder: 1 },
+    { id: '2', department: '행정실', name: '박주무관', active: true, sortOrder: 2 },
+    { id: '3', department: '교무부', name: '비활성', active: false, sortOrder: 3 }
+  ];
+  assert.deepEqual(staffForTraining(staff, {}).map(person => person.id), ['1', '2']);
+  assert.deepEqual(staffForTraining(staff, {
+    audienceMode: 'departments',
+    audienceDepartments: ['행정실']
+  }).map(person => person.id), ['2']);
+  assert.deepEqual(staffForTraining([
+    { id: 'it', department: 'IT', name: '전산담당', active: true, sortOrder: 1 }
+  ], {
+    audienceMode: 'departments',
+    audienceDepartments: ['it']
+  }).map(person => person.id), ['it']);
+  assert.deepEqual(staffForTraining(staff, {
+    audienceMode: '손상된 값',
+    audienceDepartments: ['교무부', '행정실']
+  }), []);
+  assert.deepEqual(activeDepartments(staff), ['교무부', '행정실']);
+  assert.deepEqual(normalizeAudienceDepartments([' 교무부 ', '교무부', '행정실']), ['교무부', '행정실']);
+});
+
 test('출력 정렬은 등록순을 기본으로 하고 부서순과 이름순을 지원한다', () => {
   const records = [
     { department: '연구부', name: '김교사', sortOrder: 3 },
@@ -86,6 +114,9 @@ test('연수 날짜와 시각을 검증한다', () => {
   assert.deepEqual(validateTraining({ title: '연수', date: '2026-07-14', startTime: '09:00', endTime: '10:00' }), []);
   assert.equal(validateTraining({ title: '', date: '', startTime: '11:00', endTime: '10:00' }).length, 3);
   assert.deepEqual(validateTraining({ title: '매일', daily: true, startTime: '', endTime: '' }), []);
+  assert.deepEqual(validateTraining({ title: '행정실 연수', daily: true, audienceMode: 'departments', audienceDepartments: ['행정실'] }), []);
+  assert.match(validateTraining({ title: '대상 없음', daily: true, audienceMode: 'departments', audienceDepartments: [] }).join(' '), /부서를 하나 이상/);
+  assert.match(validateTraining({ title: '대상 손상', daily: true, audienceMode: 'unexpected', audienceDepartments: [] }).join(' '), /대상 방식을 다시 선택/);
 });
 
 test('이름 나누기와 파일명 안전화', () => {
