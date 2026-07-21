@@ -5,7 +5,7 @@
  */
 
 const APP = Object.freeze({
-  VERSION: '1.9.1',
+  VERSION: '1.9.2',
   TIME_ZONE: 'Asia/Seoul',
   DATA_FILE: '학교 연수 전자서명 데이터',
   GUIDE_SHEET: '사용설명서',
@@ -42,7 +42,7 @@ const SETTING_KEYS = Object.freeze([
 const INSTANCE_PROPERTIES = Object.freeze([
   'SPREADSHEET_ID', 'INSTANCE_ID', 'ROOT_FOLDER_ID', 'SIGNATURE_FOLDER_ID', 'EXPORT_FOLDER_ID',
   'SHARE_TOKEN', 'SETUP_CODE', 'ADMIN_PEPPER', 'ADMIN_EPOCH', 'ADMIN_SALT', 'ADMIN_HASH', 'FRONTEND_URL',
-  'ONSITE_CODE_SECRET', 'FAVICON_REV'
+  'ONSITE_CODE_SECRET'
 ]);
 
 let REQUEST_CONTEXT_ = null;
@@ -133,8 +133,6 @@ function rebuildGuideSheetFromMenu() {
 
 function doGet(event) {
   resetRequestContext_();
-  const pathInfo = String(event && event.pathInfo || '').replace(/^\/+|\/+$/g, '');
-  if (pathInfo === 'favicon.svg') return faviconOutput_();
   if (event && event.parameter && String(event.parameter.asset || '').toLowerCase() === 'sheetjs') {
     return ContentService
       .createTextOutput(HtmlService.createHtmlOutputFromFile('SheetJS').getContent())
@@ -146,34 +144,27 @@ function doGet(event) {
   const webAppUrl = currentWebAppUrl_();
   const template = HtmlService.createTemplateFromFile('WebApp');
   template.WEB_APP_URL = webAppUrl;
-  const faviconRevision = PropertiesService.getScriptProperties().getProperty('FAVICON_REV') || APP.VERSION;
   return template.evaluate()
     .setTitle('학교 연수 전자서명')
-    .setFaviconUrl(webAppUrl + '/favicon.svg?v=' + encodeURIComponent(faviconRevision))
+    .setFaviconUrl(currentFaviconDataUrl_())
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
 }
 
-/** HtmlService 바깥 브라우저 탭에서도 기관 파비콘을 표시합니다. */
-function faviconOutput_() {
-  return ContentService.createTextOutput(faviconSvg_())
-    .setMimeType(ContentService.MimeType.XML);
-}
-
-function faviconSvg_() {
+/** HtmlService가 무시하는 내부 link 대신 바깥 브라우저 탭에 직접 넣을 데이터 URL입니다. */
+function currentFaviconDataUrl_() {
+  const cache = CacheService.getScriptCache();
+  let faviconData = cache.get('PUBLIC_FAVICON_DATA');
   try {
     const properties = PropertiesService.getScriptProperties();
-    if (properties.getProperty('SPREADSHEET_ID')) {
-      const faviconData = validateFaviconData_(readSettings_().faviconData);
-      if (faviconData) {
-        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
-          '<image width="64" height="64" href="' + faviconData + '"/>' +
-          '</svg>';
-      }
+    if (faviconData === null && properties.getProperty('SPREADSHEET_ID')) {
+      faviconData = String(readSettings_().faviconData || '');
+      cache.put('PUBLIC_FAVICON_DATA', faviconData || '-', 21600);
     }
+    if (faviconData && faviconData !== '-') return validateFaviconData_(faviconData);
   } catch (error) {
     console.warn('사용자 지정 파비콘을 읽지 못해 기본 아이콘을 사용합니다: ' + String(error && error.message || error));
   }
-  return defaultFaviconSvg_();
+  return 'data:image/svg+xml;base64,' + Utilities.base64Encode(defaultFaviconSvg_(), Utilities.Charset.UTF_8);
 }
 
 function defaultFaviconSvg_() {
@@ -923,9 +914,7 @@ function saveSettings_(input) {
   if (!privacyReady_(settings)) apiError_('PRIVACY_REQUIRED', '학교명과 개인정보 처리 안내를 모두 입력해 주세요.');
   if (!/^#[0-9a-f]{6}$/i.test(settings.brandColor)) settings.brandColor = '#315c54';
   writeSettings_(settings);
-  if (settings.faviconData !== String(current.faviconData || '')) {
-    PropertiesService.getScriptProperties().setProperty('FAVICON_REV', randomToken_(10));
-  }
+  CacheService.getScriptCache().put('PUBLIC_FAVICON_DATA', settings.faviconData || '-', 21600);
   audit_('save_settings', 'settings', 1, '기관 설정 변경');
   return { settings: settings };
 }
